@@ -121,22 +121,19 @@ sequenceDiagram
 
     C->>A: アップロード要求（任意の方法）
     A->>A: ユーザー認証・UUID v4 発行
-    A->>F: POST /internal/token
-    Note right of A: Authorization: Bearer サーバー間JWT<br/>body: { uuid, scope: "upload" }
+    A->>F: POST /internal/token（サーバー間JWT、uuid、scope=upload）
     F->>F: アップロード用JWT発行
-    F-->>A: { upload_token }
+    F-->>A: upload_token
     A-->>C: uuid と upload_token を任意の方法で渡す
 
-    C->>F: PUT /files/{uuid}
-    Note right of C: Authorization: Bearer upload_token
+    C->>F: PUT /files/{uuid}（upload_token）
     F->>F: JWT検証（scope=upload・sub={uuid}一致）
     F->>F: UUID既存チェック（重複なら409）
     F->>F: バイナリを pending 状態で保存
     F-->>C: 201 Created
 
     C->>A: 確定要求（任意の方法）
-    A->>F: POST /internal/files/{uuid}/confirm
-    Note right of A: Authorization: Bearer サーバー間JWT
+    A->>F: POST /internal/files/{uuid}/confirm（サーバー間JWT）
     F->>F: ファイルを confirmed 状態に確定
     F-->>A: 200 OK
     A-->>C: 完了通知（任意の方法）
@@ -151,23 +148,20 @@ sequenceDiagram
     participant F as File Server
 
     alt private ファイルの場合
-        C->>A: read token 要求（任意の方法）
+        C->>A: read token 要求（任意の方法、対象 UUID リストを渡す）
         A->>A: ユーザー認証
-        A->>F: POST /internal/token
-        Note right of F: Authorization: Bearer サーバー間JWT<br/>body: { uuids: [...], scope: "read" }
+        A->>F: POST /internal/token（サーバー間JWT、uuids リスト、scope=read）
         F->>F: read token 発行（uuids リストを含む）
-        F-->>A: { read_token }
+        F-->>A: read_token
         A-->>C: read_token を任意の方法で渡す
-        C->>F: GET /files/{uuid}/photo.jpg
-        Note right of C: Authorization: Bearer read_token
+        C->>F: GET /files/{uuid}/photo.jpg（read_token）
         F->>F: JWT検証・token内のuuidsに{uuid}が含まれるか確認
     else public ファイルの場合
         C->>F: GET /files/{uuid}/photo.jpg
     end
 
     F->>F: ストレージからバイナリ取得
-    F-->>C: 200 OK
-    Note right of F: Content-Disposition: attachment; filename="photo.jpg"<br/>Cache-Control: public, max-age=31536000, immutable
+    F-->>C: 200 OK（バイナリ、Content-Disposition付き）
 ```
 
 ### ファイル削除フロー
@@ -180,8 +174,7 @@ sequenceDiagram
 
     C->>A: 削除要求（任意の方法）
     A->>A: ユーザー認証
-    A->>F: DELETE /internal/files/{uuid}
-    Note right of A: Authorization: Bearer サーバー間JWT
+    A->>F: DELETE /internal/files/{uuid}（サーバー間JWT）
     F->>F: ストレージからファイル削除
     F-->>A: 204 No Content
     A-->>C: 完了通知（任意の方法）
@@ -197,8 +190,7 @@ sequenceDiagram
 
     C->>A: 公開設定変更要求（任意の方法）
     A->>A: ユーザー認証
-    A->>F: PATCH /internal/files/{uuid}/visibility
-    Note right of A: Authorization: Bearer サーバー間JWT<br/>body: { visibility: "public" or "private" }
+    A->>F: PATCH /internal/files/{uuid}/visibility（サーバー間JWT、public or private）
     F->>F: 公開設定を更新（ファイル本体は変更しない）
     F-->>A: 200 OK
     A-->>C: 完了通知（任意の方法）
