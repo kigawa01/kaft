@@ -57,3 +57,204 @@ type 一覧: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`
 
 - 会話・説明・レビューは日本語で行う
 - コード識別子・コマンド・ログは原文のまま扱う
+
+---
+
+## 画像配信基盤の設計（refs #2）
+
+### 概要
+
+UUID で識別されたファイルを、JWT で認可制御しながら immutable に配信する基盤を設計・実装する。
+File Server が JWT 発行・ファイル操作の全エンドポイントを持つ。API Server は任意のプログラムが担い、ユーザー認証と File Server への橋渡しを行う。
+
+### 設計方針
+
+| 項目 | 方針 |
+|---|---|
+| ファイル識別子 | UUID v4（API Server がアップロード要求時に発行） |
+| JWT 発行 | File Server が発行。API Server は任意の方法で Client に渡す |
+| サーバー間認証 | API Server → File Server 間も JWT で認証 |
+| immutability | ファイル本体は変更不可。公開設定（public/private）のみ変更可 |
+| 公開設定 | public: read token 不要 / private: read token 必須 |
+| ファイル名指定 | GET リクエスト時にクエリパラメータでファイル名を指定可能 |
+
+### コンポーネント構成
+
+```mermaid
+graph LR
+    C[Client] -->|任意の方法| A[API Server<br/>任意のプログラム]
+    C -->|PUT / GET| F[File Server]
+    A -->|内部API + サーバー間JWT| F
+```
+
+| コンポーネント | 役割 |
+|---|---|
+| Client | File Server に対してファイル操作を行う |
+| API Server | ユーザー認証・UUID 発行・File Server からの JWT 取得と Client への受け渡し（方法は任意） |
+| File Server | JWT 発行・検証・ファイル保存・配信・公開設定管理 |
+
+### File Server エンドポイント一覧
+
+**Client 向け**
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| `PUT` | `/files/{uuid}` | ファイルアップロード（upload token 必須） |
+| `GET` | `/files/{uuid}/{filename}` | ファイル取得。public は token 不要、private は read token 必須。パスのファイル名がそのまま Content-Disposition に使用される |
+
+**API Server 向け内部 API**
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| `POST` | `/internal/token` | JWT 発行（upload token / read token） |
+| `POST` | `/internal/files/{uuid}/confirm` | アップロード確定 |
+| `DELETE` | `/internal/files/{uuid}` | ファイル削除 |
+| `PATCH` | `/internal/files/{uuid}/visibility` | 公開設定変更 |
+
+### アップロード処理フロー
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as API Server
+    participant F as File Server
+
+    C->>A: アップロード要求（任意の方法）
+    A->>A: ユーザー認証・UUID v4 発行
+    A->>F: POST /internal/token（サーバー間JWT、uuid、scope=upload）
+    F->>F: アップロード用JWT発行
+    F-->>A: upload_token
+    A-->>C: uuid と upload_token を任意の方法で渡す
+
+    C->>F: PUT /files/{uuid}（upload_token）
+    F->>F: JWT検証（scope=upload・sub={uuid}一致）
+    F->>F: UUID既存チェック（重複なら409）
+    F->>F: バイナリを pending 状態で保存
+    F-->>C: 201 Created
+
+    C->>A: 確定要求（任意の方法）
+    A->>F: POST /internal/files/{uuid}/confirm（サーバー間JWT）
+    F->>F: ファイルを confirmed 状態に確定
+    F-->>A: 200 OK
+    A-->>C: 完了通知（任意の方法）
+```
+
+### ファイル取得フロー
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as API Server
+    participant F as File Server
+
+    alt private ファイルの場合
+        C->>A: read token 要求（任意の方法、対象 UUID リストを渡す）
+        A->>A: ユーザー認証
+        A->>F: POST /internal/token（サーバー間JWT、uuids リスト、scope=read）
+        F->>F: read token 発行（uuids リストを含む）
+        F-->>A: read_token
+        A-->>C: read_token を任意の方法で渡す
+        C->>F: GET /files/{uuid}/photo.jpg（read_token）
+        F->>F: JWT検証・token内のuuidsに{uuid}が含まれるか確認
+    else public ファイルの場合
+        C->>F: GET /files/{uuid}/photo.jpg
+    end
+
+    F->>F: ストレージからバイナリ取得
+    F-->>C: 200 OK（バイナリ、Content-Disposition付き）
+```
+
+### ファイル削除フロー
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as API Server
+    participant F as File Server
+
+    C->>A: 削除要求（任意の方法）
+    A->>A: ユーザー認証
+    A->>F: DELETE /internal/files/{uuid}（サーバー間JWT）
+    F->>F: ストレージからファイル削除
+    F-->>A: 204 No Content
+    A-->>C: 完了通知（任意の方法）
+```
+
+### 公開設定変更フロー
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as API Server
+    participant F as File Server
+
+    C->>A: 公開設定変更要求（任意の方法）
+    A->>A: ユーザー認証
+    A->>F: PATCH /internal/files/{uuid}/visibility（サーバー間JWT、public or private）
+    F->>F: 公開設定を更新（ファイル本体は変更しない）
+    F-->>A: 200 OK
+    A-->>C: 完了通知（任意の方法）
+```
+
+### JWT ペイロード設計
+
+**アップロード用 JWT**
+
+```json
+{
+  "sub": "<uuid>",
+  "exp": 1234567890,
+  "iat": 1234567000,
+  "scope": "upload"
+}
+```
+
+**読み取り用 JWT**
+
+```json
+{
+  "uuids": ["<uuid1>", "<uuid2>"],
+  "exp": 1234567890,
+  "iat": 1234567000,
+  "scope": "read"
+}
+```
+
+**サーバー間 JWT（API Server → File Server）**
+
+```json
+{
+  "iss": "api-server",
+  "exp": 1234567890,
+  "iat": 1234567000,
+  "scope": "internal"
+}
+```
+
+### immutability の保証
+
+- ファイル本体はアップロード後に変更不可（上書きリクエストは 409 Conflict）
+- 公開設定（public/private）はファイル本体と分離して管理し変更可能
+- 削除は API Server 経由で可能
+- public ファイルのキャッシュヘッダ: `Cache-Control: public, max-age=31536000, immutable`
+
+### 技術スタック
+
+| 項目 | 採用技術 |
+|---|---|
+| 言語 | Kotlin |
+| フレームワーク | Ktor |
+| JWT ライブラリ | `io.ktor:ktor-server-auth-jwt` |
+| ビルドツール | Gradle (Kotlin DSL) |
+
+### 作成・変更ファイル一覧（#2）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `build.gradle.kts` | 新規作成 | Gradle ビルド設定（Ktor・JWT 依存を含む） |
+| `src/main/kotlin/Application.kt` | 新規作成 | Ktor アプリケーションエントリポイント |
+| `src/main/kotlin/routes/FileRoutes.kt` | 新規作成 | Client 向けエンドポイント（PUT / GET） |
+| `src/main/kotlin/routes/InternalRoutes.kt` | 新規作成 | API Server 向け内部エンドポイント |
+| `src/main/kotlin/storage/FileStorage.kt` | 新規作成 | ストレージ操作（UUID キー読み書き・削除・公開設定管理） |
+| `src/main/kotlin/auth/JwtService.kt` | 新規作成 | JWT 発行・検証ロジック |
+| `src/test/kotlin/` | 新規作成 | 各コンポーネントのテスト |
