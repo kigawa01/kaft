@@ -98,14 +98,17 @@ UUID で識別されたファイルを、JWT で認可制御しながら immutab
 | メソッド | パス | 説明 |
 |---|---|---|
 | `POST` | `/files/upload-token` | UUID 発行・アップロード用 JWT 発行 |
+| `POST` | `/files/{uuid}/token` | 読み取り用 JWT 発行 |
+| `DELETE` | `/files/{uuid}` | ファイル削除（File Server へ委譲） |
 
 **File Server**
 
 | メソッド | パス | 説明 |
 |---|---|---|
 | `PUT` | `/files/{uuid}` | ファイルアップロード（Client から直接） |
-| `GET` | `/files/{uuid}` | ファイル取得 |
-| `DELETE` | `/files/{uuid}` | ファイル削除 |
+| `GET` | `/files/{uuid}` | ファイル取得（Client から直接） |
+| `POST` | `/internal/token` | JWT 発行（API Server からのみ） |
+| `DELETE` | `/internal/files/{uuid}` | ファイル削除（API Server からのみ） |
 
 ### アップロード処理フロー
 
@@ -159,17 +162,12 @@ sequenceDiagram
     participant A as API Server
     participant F as File Server
 
-    C->>A: POST /files/{uuid}/token?scope=delete<br/>Authorization: Bearer <ユーザー認証JWT>
+    C->>A: DELETE /files/{uuid}<br/>Authorization: Bearer <ユーザー認証JWT>
     A->>A: ユーザー認証JWT検証
-    A->>F: POST /internal/token<br/>{ uuid, scope: "delete" }
-    F->>F: 削除用JWT発行
-    F-->>A: { delete_token }
-    A-->>C: { delete_token }
-
-    C->>F: DELETE /files/{uuid}<br/>Authorization: Bearer <delete_token>
-    F->>F: JWT検証（署名・有効期限・scope=delete・sub={uuid}一致）
+    A->>F: DELETE /internal/files/{uuid}
     F->>F: ストレージからファイル削除
-    F-->>C: 204 No Content
+    F-->>A: 204 No Content
+    A-->>C: 204 No Content
 ```
 
 ### JWT ペイロード設計
