@@ -65,54 +65,48 @@ type 一覧: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`
 ### 概要
 
 UUID で識別されたファイルを、JWT で認可制御しながら immutable に配信する基盤を設計・実装する。
+File Server が JWT 発行・ファイル操作の全エンドポイントを持つ。API Server は任意のプログラムが担い、ユーザー認証と File Server への橋渡しを行う。
 
 ### 設計方針
 
 | 項目 | 方針 |
 |---|---|
-| ファイル識別子 | UUID v4（アップロード時に API Server が発行） |
-| アクセス制御 | JWT（API Server が任意の方式で発行・有効期限あり） |
-| サーバー間認証 | API Server と File Server 間も JWT で認証 |
+| ファイル識別子 | UUID v4（API Server がアップロード要求時に発行） |
+| JWT 発行 | File Server が発行。API Server は任意の方法で Client に渡す |
+| サーバー間認証 | API Server → File Server 間も JWT で認証 |
 | immutability | ファイル本体は変更不可。公開設定（public/private）のみ変更可 |
-| 公開設定 | public: read token なしで取得可 / private: read token 必須 |
+| 公開設定 | public: read token 不要 / private: read token 必須 |
+| ファイル名指定 | GET リクエスト時にクエリパラメータでファイル名を指定可能 |
 
 ### コンポーネント構成
 
 ```mermaid
 graph LR
-    C[Client] -->|ユーザー操作| A[API Server]
-    C -->|ファイルアップロード・取得| F[File Server]
-    A -->|内部API（サーバー間JWT）| F
+    C[Client] -->|任意の方法| A[API Server<br/>任意のプログラム]
+    C -->|PUT / GET| F[File Server]
+    A -->|内部API + サーバー間JWT| F
 ```
 
 | コンポーネント | 役割 |
 |---|---|
-| Client | アップロード・取得・削除・設定変更を要求する |
-| API Server | ユーザー認証・UUID 発行・JWT 発行（任意の方式）・File Server への委譲 |
-| File Server | JWT 検証・ファイル保存・配信・公開設定管理 |
+| Client | File Server に対してファイル操作を行う |
+| API Server | ユーザー認証・UUID 発行・File Server からの JWT 取得と Client への受け渡し（方法は任意） |
+| File Server | JWT 発行・検証・ファイル保存・配信・公開設定管理 |
 
-### エンドポイント一覧
+### File Server エンドポイント一覧
 
-**API Server（Client向け）**
-
-| メソッド | パス | 説明 |
-|---|---|---|
-| `POST` | `/files/upload-token` | UUID 発行・アップロード用 JWT 発行 |
-| `POST` | `/files/read-token` | 読み取り用 JWT 発行（指定した複数 UUID を含む） |
-| `DELETE` | `/files/{uuid}` | ファイル削除（File Server へ委譲） |
-| `PATCH` | `/files/{uuid}/visibility` | 公開設定変更（File Server へ委譲） |
-
-**File Server（Client向け）**
+**Client 向け**
 
 | メソッド | パス | 説明 |
 |---|---|---|
-| `PUT` | `/files/{uuid}` | ファイルアップロード（Client から直接） |
-| `GET` | `/files/{uuid}` | ファイル取得（public は token 不要、private は token 必須） |
+| `PUT` | `/files/{uuid}` | ファイルアップロード（upload token 必須） |
+| `GET` | `/files/{uuid}?name={filename}` | ファイル取得。public は token 不要、private は read token 必須。`name` でダウンロード時のファイル名を指定 |
 
-**File Server（API Server向け内部API）**
+**API Server 向け内部 API**
 
 | メソッド | パス | 説明 |
 |---|---|---|
+| `POST` | `/internal/token` | JWT 発行（upload token / read token） |
 | `POST` | `/internal/files/{uuid}/confirm` | アップロード確定 |
 | `DELETE` | `/internal/files/{uuid}` | ファイル削除 |
 | `PATCH` | `/internal/files/{uuid}/visibility` | 公開設定変更 |
@@ -125,10 +119,12 @@ sequenceDiagram
     participant A as API Server
     participant F as File Server
 
-    C->>A: POST /files/upload-token<br/>Authorization: Bearer <ユーザー認証JWT>
-    A->>A: ユーザー認証JWT検証・UUID v4 発行
-    A->>A: アップロード用JWT発行（sub=uuid, scope=upload）
-    A-->>C: { uuid, upload_token }
+    C->>A: アップロード要求（任意の方法）
+    A->>A: ユーザー認証・UUID v4 発行
+    A->>F: POST /internal/token<br/>Authorization: Bearer <サーバー間JWT><br/>body: { uuid, scope: "upload" }
+    F->>F: アップロード用JWT発行
+    F-->>A: { upload_token }
+    A-->>C: uuid と upload_token を任意の方法で渡す
 
     C->>F: PUT /files/{uuid}<br/>Authorization: Bearer <upload_token><br/>body: バイナリ
     F->>F: JWT検証（scope=upload・sub={uuid}一致）
@@ -136,11 +132,11 @@ sequenceDiagram
     F->>F: バイナリを pending 状態で保存
     F-->>C: 201 Created
 
-    C->>A: POST /files/{uuid}/confirm<br/>Authorization: Bearer <ユーザー認証JWT>
+    C->>A: 確定要求（任意の方法）
     A->>F: POST /internal/files/{uuid}/confirm<br/>Authorization: Bearer <サーバー間JWT>
     F->>F: ファイルを confirmed 状態に確定
     F-->>A: 200 OK
-    A-->>C: 200 OK
+    A-->>C: 完了通知（任意の方法）
 ```
 
 ### ファイル取得フロー
@@ -152,18 +148,20 @@ sequenceDiagram
     participant F as File Server
 
     alt private ファイルの場合
-        C->>A: POST /files/read-token<br/>Authorization: Bearer <ユーザー認証JWT><br/>body: { uuids: ["uuid1", "uuid2", ...] }
-        A->>A: ユーザー認証JWT検証
-        A->>A: read token 発行（uuids リストを含む）
-        A-->>C: { read_token }
-        C->>F: GET /files/{uuid}<br/>Authorization: Bearer <read_token>
+        C->>A: read token 要求（任意の方法）<br/>対象 UUID リストを渡す
+        A->>A: ユーザー認証
+        A->>F: POST /internal/token<br/>Authorization: Bearer <サーバー間JWT><br/>body: { uuids: ["uuid1", ...], scope: "read" }
+        F->>F: read token 発行（uuids リストを含む）
+        F-->>A: { read_token }
+        A-->>C: read_token を任意の方法で渡す
+        C->>F: GET /files/{uuid}?name=photo.jpg<br/>Authorization: Bearer <read_token>
         F->>F: JWT検証・token内のuuidsに{uuid}が含まれるか確認
     else public ファイルの場合
-        C->>F: GET /files/{uuid}
+        C->>F: GET /files/{uuid}?name=photo.jpg
     end
 
     F->>F: ストレージからバイナリ取得
-    F-->>C: 200 OK バイナリ<br/>Cache-Control: public, max-age=31536000, immutable
+    F-->>C: 200 OK バイナリ<br/>Content-Disposition: attachment; filename="photo.jpg"<br/>Cache-Control: public, max-age=31536000, immutable
 ```
 
 ### ファイル削除フロー
@@ -174,12 +172,12 @@ sequenceDiagram
     participant A as API Server
     participant F as File Server
 
-    C->>A: DELETE /files/{uuid}<br/>Authorization: Bearer <ユーザー認証JWT>
-    A->>A: ユーザー認証JWT検証
+    C->>A: 削除要求（任意の方法）
+    A->>A: ユーザー認証
     A->>F: DELETE /internal/files/{uuid}<br/>Authorization: Bearer <サーバー間JWT>
     F->>F: ストレージからファイル削除
     F-->>A: 204 No Content
-    A-->>C: 204 No Content
+    A-->>C: 完了通知（任意の方法）
 ```
 
 ### 公開設定変更フロー
@@ -190,12 +188,12 @@ sequenceDiagram
     participant A as API Server
     participant F as File Server
 
-    C->>A: PATCH /files/{uuid}/visibility<br/>Authorization: Bearer <ユーザー認証JWT><br/>body: { visibility: "public" | "private" }
-    A->>A: ユーザー認証JWT検証
+    C->>A: 公開設定変更要求（任意の方法）
+    A->>A: ユーザー認証
     A->>F: PATCH /internal/files/{uuid}/visibility<br/>Authorization: Bearer <サーバー間JWT><br/>body: { visibility: "public" | "private" }
     F->>F: 公開設定を更新（ファイル本体は変更しない）
     F-->>A: 200 OK
-    A-->>C: 200 OK
+    A-->>C: 完了通知（任意の方法）
 ```
 
 ### JWT ペイロード設計
@@ -237,7 +235,7 @@ sequenceDiagram
 
 - ファイル本体はアップロード後に変更不可（上書きリクエストは 409 Conflict）
 - 公開設定（public/private）はファイル本体と分離して管理し変更可能
-- **削除は可能**（API Server 経由）
+- 削除は API Server 経由で可能
 - public ファイルのキャッシュヘッダ: `Cache-Control: public, max-age=31536000, immutable`
 
 ### 技術スタック
@@ -255,7 +253,8 @@ sequenceDiagram
 |---|---|---|
 | `build.gradle.kts` | 新規作成 | Gradle ビルド設定（Ktor・JWT 依存を含む） |
 | `src/main/kotlin/Application.kt` | 新規作成 | Ktor アプリケーションエントリポイント |
-| `src/main/kotlin/routes/FileRoutes.kt` | 新規作成 | `/files` エンドポイント定義 |
+| `src/main/kotlin/routes/FileRoutes.kt` | 新規作成 | Client 向けエンドポイント（PUT / GET） |
+| `src/main/kotlin/routes/InternalRoutes.kt` | 新規作成 | API Server 向け内部エンドポイント |
 | `src/main/kotlin/storage/FileStorage.kt` | 新規作成 | ストレージ操作（UUID キー読み書き・削除・公開設定管理） |
 | `src/main/kotlin/auth/JwtService.kt` | 新規作成 | JWT 発行・検証ロジック |
 | `src/test/kotlin/` | 新規作成 | 各コンポーネントのテスト |
