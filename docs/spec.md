@@ -1,5 +1,129 @@
 # kaft 設計・仕様規約
 
+## k8s デプロイ設計（refs #7）
+
+### 概要
+
+kaft（Kotlin/Ktor ファイルサーバ）を Kubernetes 上にデプロイするための Dockerfile および k8s マニフェストを作成する。
+ファイルストレージは PersistentVolumeClaim で永続化し、シークレットは k8s Secret で管理する。
+
+### 設計方針
+
+| 項目 | 方針 |
+|---|---|
+| コンテナビルド | Gradle multi-stage build で fat JAR を生成し、JRE のみの runtime イメージで実行 |
+| ファイル永続化 | PersistentVolumeClaim を Deployment にマウントし `/data/kaft-storage` に保存 |
+| 設定管理 | 非機密設定は ConfigMap、JWT シークレットは Secret で管理 |
+| ポート公開 | ClusterIP Service でクラスタ内に 8080 ポートを公開 |
+| Namespace | `kaft` Namespace を作成してリソースを分離 |
+
+### ディレクトリ構成
+
+```
+kaft/
+├── Dockerfile
+└── k8s/
+    ├── namespace.yaml
+    ├── configmap.yaml
+    ├── secret.example.yaml  # リポジトリに含める雛形（値はプレースホルダ）
+    ├── pvc.yaml
+    ├── deployment.yaml
+    └── service.yaml
+```
+
+### 環境変数マッピング
+
+| 環境変数 | ソース | 内容 |
+|---|---|---|
+| `PORT` | ConfigMap | リッスンポート（`8080`） |
+| `KAFT_STORAGE_PATH` | ConfigMap | ストレージパス（`/data/kaft-storage`） |
+| `KAFT_JWT_ISSUER` | ConfigMap | JWT 発行者識別子（`kaft`） |
+| `KAFT_JWT_EXPIRATION_SECONDS` | ConfigMap | JWT 有効期限（秒）（`3600`） |
+| `KAFT_JWT_SECRET` | Secret | JWT 署名シークレット |
+| `KAFT_INTERNAL_JWT_SECRET` | Secret | サーバー間通信 JWT シークレット |
+
+### Dockerfile 設計
+
+```dockerfile
+# Stage 1: ビルド
+FROM gradle:8-jdk21 AS builder
+WORKDIR /app
+COPY . .
+RUN gradle shadowJar --no-daemon
+
+# Stage 2: ランタイム
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=builder /app/build/libs/*-all.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+### k8s リソース設計
+
+**Namespace（`k8s/namespace.yaml`）**
+
+- Name: `kaft`
+
+**ConfigMap（`k8s/configmap.yaml`）**
+
+| キー | 値 |
+|---|---|
+| `PORT` | `8080` |
+| `KAFT_STORAGE_PATH` | `/data/kaft-storage` |
+| `KAFT_JWT_ISSUER` | `kaft` |
+| `KAFT_JWT_EXPIRATION_SECONDS` | `3600` |
+
+**Secret（`k8s/secret.example.yaml`）**
+
+| キー | 内容 |
+|---|---|
+| `KAFT_JWT_SECRET` | JWT 署名シークレット（プレースホルダ） |
+| `KAFT_INTERNAL_JWT_SECRET` | 内部通信 JWT シークレット（プレースホルダ） |
+
+**PersistentVolumeClaim（`k8s/pvc.yaml`）**
+
+| 項目 | 値 |
+|---|---|
+| Name | `kaft-storage` |
+| AccessMode | `ReadWriteOnce` |
+| Storage | `10Gi` |
+
+**Deployment（`k8s/deployment.yaml`）**
+
+| 項目 | 値 |
+|---|---|
+| replicas | `1`（PVC が RWO のため） |
+| image | `ghcr.io/kigawa01/kaft:latest` |
+| envFrom | ConfigMap `kaft-config` + Secret `kaft-secret` |
+| volumeMount | PVC `kaft-storage` → `/data/kaft-storage` |
+| readinessProbe | TCP 8080（initialDelaySeconds: 10） |
+| livenessProbe | TCP 8080（initialDelaySeconds: 30） |
+
+**Service（`k8s/service.yaml`）**
+
+| 項目 | 値 |
+|---|---|
+| type | `ClusterIP` |
+| port | `8080` |
+| targetPort | `8080` |
+
+### 作成・変更ファイル一覧（#7）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `Dockerfile` | 新規作成 | multi-stage ビルド定義 |
+| `.dockerignore` | 新規作成 | ビルドに不要なファイルを除外 |
+| `k8s/namespace.yaml` | 新規作成 | `kaft` Namespace |
+| `k8s/configmap.yaml` | 新規作成 | 非機密設定 |
+| `k8s/secret.example.yaml` | 新規作成 | Secret 雛形（値はプレースホルダ） |
+| `k8s/pvc.yaml` | 新規作成 | ファイルストレージ用 PVC |
+| `k8s/deployment.yaml` | 新規作成 | アプリ Deployment |
+| `k8s/service.yaml` | 新規作成 | ClusterIP Service |
+| `.gitignore` | 更新 | `k8s/secret.yaml` を除外に追加 |
+
+---
+
 ## リポジトリ規約設計（refs #1）
 
 ### 概要
