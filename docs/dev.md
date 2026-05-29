@@ -82,3 +82,38 @@ refs #<issue番号>
 
 - コードを見れば分かることは書かない
 - 非自明な制約・外部仕様への依存・回避策がある場合のみ書く
+
+---
+
+## Kotlin コーディング規約
+
+### 基本ルール
+
+- Kotlin 公式コーディング規約に従う
+- パッケージ名: `net.kigawa.kaft.<モジュール名>`
+- ファイル名: PascalCase（例: `FileStorage.kt`）
+
+### 命名規則
+
+| 種別 | 記法 | 例 |
+|---|---|---|
+| クラス・オブジェクト | PascalCase | `JwtService`, `FileStorage` |
+| 関数・変数 | camelCase | `verifyUploadToken`, `fileUuid` |
+| 定数（companion / top-level val）| UPPER_SNAKE_CASE | `MAX_FILE_SIZE` |
+| パッケージ | 小文字ドット区切り | `net.kigawa.kaft.auth` |
+
+### 設計方針
+
+- 副作用を持つ処理（ファイルIO、JWT発行・検証）はクラスに閉じ込める
+- Ktor のルート定義は `configure*` 拡張関数としてモジュール化する
+- 設定値はすべて `KaftConfig` 経由で取得し、ハードコードしない
+
+---
+
+## ビルド・テスト
+
+```bash
+./gradlew build        # ビルド
+./gradlew test         # テスト実行
+./gradlew run          # ローカル起動
+```

@@ -1,5 +1,29 @@
 # kaft
 
+JWTによるアクセス制御付きファイルアップロード・配信サーバー。Kotlin/Ktor で実装し、UUID でファイルを識別する。
+
+## アーキテクチャ
+
+```
+src/main/kotlin/net/kigawa/kaft/
+├── Application.kt           # Ktor アプリケーションエントリポイント
+├── auth/JwtService.kt       # JWT 発行・検証（upload / read / internal）
+├── config/KaftConfig.kt     # 設定読み込み
+├── routes/FileRoutes.kt     # Client 向けエンドポイント（PUT / GET）
+├── routes/InternalRoutes.kt # API Server 向け内部エンドポイント
+└── storage/FileStorage.kt   # ファイルストレージ操作
+
+docs/                        # 仕様・開発規約ドキュメント
+```
+
+## ビルド・テスト
+
+```bash
+./gradlew build        # ビルド
+./gradlew test         # テスト実行
+./gradlew run          # ローカル起動
+```
+
 ## 作業フロー（必ず遵守）
 
 > **CRITICAL（必須）**: 以下のステップは順番通りに実行すること。特に「計画PRのマージ確認」を飛ばして実装に進むことは**絶対に禁止**。ユーザーが実装を依頼してきても、計画PRがマージされていない場合は実装を拒否し、計画PRの作成を先に求めること。
