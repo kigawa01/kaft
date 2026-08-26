@@ -298,3 +298,94 @@ sequenceDiagram
 | `src/main/kotlin/net/kigawa/kaft/config/KaftConfig.kt` | 変更 | ストレージ関連設定を `StorageConfig`（backend種別 + local/r2それぞれの設定）に拡張 |
 | `src/main/kotlin/net/kigawa/kaft/Application.kt` | 変更 | `StorageConfig` に応じて `LocalFileStorage`/`R2FileStorage` を選択して生成する |
 | `src/test/kotlin/.../storage/R2FileStorageTest.kt` | 新規作成 | R2互換のモック/ローカルS3実装（例: 既存のS3互換テストダブル）を用いたテスト、または単体では検証できない部分は手動確認とする |
+
+---
+
+## k8s デプロイ設計（refs #7）
+
+### 概要
+
+kaft を Kubernetes 上に、kigawa-net/lipl と同様の3環境構成（dev/stg/main）でデプロイする。マニフェストは本リポジトリ（kaft）内に作成し、ArgoCD登録は `kigawa01/k8s-system` から行う。
+
+### デプロイトリガー
+
+| トリガー | 環境 | Namespace | イメージタグ |
+|---|---|---|---|
+| PRに `deploy-preview` ラベルを付与 | **dev**（PRごとに独立） | `kaft-dev-pr-<PR番号>` | `develop-<commit-sha>` |
+| `develop` リポジトリの `main` へマージ | **stg** | `kaft-stg` | `main-<commit-sha>` |
+| `deploy-prod.yml` を手動実行（workflow_dispatch） | **main（本番相当）** | `kaft-main` | stgに現在デプロイされているものと同一（再ビルドしない） |
+
+- kaft はpublicリポジトリのため、ArgoCD ApplicationSetのPull Request Generatorに `github.labels: [deploy-preview]` フィルタを設定し、外部の任意PRでdev環境が自動生成されないようにする（kigawa-net/lipl と同じ対策）
+- stgはKtorのテスト（`./gradlew test`）通過後、Docker build & push、`kigawa01/k8s-system` 側マニフェスト更新まで自動で行う
+- main（本番相当）はstgで検証済みイメージをそのまま手動プロモートする（再ビルドしない）
+
+### ドメイン
+
+| 環境 | ホスト |
+|---|---|
+| main | `kaft.kigawa.net` |
+| stg | `kaft-stg.kigawa.net` |
+| dev | 割り当てなし（`kubectl port-forward` で確認） |
+
+### R2バケット
+
+環境ごとにデータを分離するため、バケットを分ける。
+
+| 環境 | バケット名 |
+|---|---|
+| main | `kaft`（作成済み、kigawa-net/infra#85） |
+| stg | `kaft-stg`（新規作成） |
+| dev | `kaft-dev`（新規作成、PRごとの共有バケット） |
+
+R2アカウント認証情報（access key/secret key/account id）は既存の `r2-access`/`r2-secret`/`r2-account` Bitwarden シークレットを流用する。
+
+### Dockerfile
+
+```dockerfile
+FROM gradle:8-jdk21-alpine AS builder
+WORKDIR /app
+COPY . .
+RUN gradle shadowJar --no-daemon
+
+FROM eclipse-temurin:21-jre-alpine
+RUN addgroup -S kaft && adduser -S kaft -G kaft
+WORKDIR /app
+COPY --from=builder --chown=kaft:kaft /app/build/libs/*-all.jar app.jar
+USER kaft
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+（lipl backendと同様、非rootユーザーで実行する）
+
+### k8s リソース設計（kaft/k8s/{dev,stg,main}/）
+
+lipl/platform と同様のKustomize構成:
+
+| リソース | 内容 |
+|---|---|
+| Deployment + Service | `kaft` コンテナ、ポート8080 |
+| 環境変数 | `PORT`, `KAFT_STORAGE_BACKEND=r2`, `KAFT_STORAGE_R2_ACCOUNT_ID`, `KAFT_STORAGE_R2_BUCKET`, `KAFT_STORAGE_R2_ACCESS_KEY_ID`（Secret）, `KAFT_STORAGE_R2_SECRET_ACCESS_KEY`（Secret）, `KAFT_JWT_SECRET`（Secret）, `KAFT_JWT_ISSUER`, `KAFT_JWT_EXPIRATION_SECONDS`, `KAFT_INTERNAL_JWT_SECRET`（Secret） |
+| BitwardenSecret | JWT系シークレット（新規生成・Bitwarden登録）、R2認証情報（既存流用） |
+| Ingress（stg/mainのみ） | ホスト名は上記ドメイン表参照 |
+
+### ArgoCD登録（kigawa01/k8s-system側で対応）
+
+- `apps/kaft-dev-appset.yml`: ApplicationSet（Pull Request Generator、`deploy-preview`ラベルフィルタ）、sourceは本リポジトリ（kaft）の `k8s/dev`
+- `apps/kaft-stg-app.yml`, `apps/kaft-main-app.yml`: 静的Application、sourceはそれぞれ `k8s/stg`, `k8s/main`
+
+### CI/CD（本リポジトリ側）
+
+lipl と同様に `.github/workflows/deploy-dev.yml`（PR、テスト+ビルド+push、マニフェスト更新なし）、`deploy-stg.yml`（`develop`ブランチへのpush → テスト+ビルド+push+`kigawa01/k8s-system`へのマニフェスト更新）、`deploy-prod.yml`（`workflow_dispatch`、stgの現在のイメージタグをmainへコピー）の3ワークフローを作成する。
+
+※ 本リポジトリのブランチ戦略では `develop` が統合ブランチのため、「mainへのマージでstg」ではなく「**developへのマージでstg**」と読み替える点に注意（kaft独自の運用）。
+
+### 作成・変更ファイル一覧（#7）
+
+| ファイル | 変更種別 |
+|---|---|
+| `Dockerfile` | 新規作成 |
+| `k8s/dev/`, `k8s/stg/`, `k8s/main/`（各: deployment.yaml, service.yaml, kustomization.yaml。stg/mainのみingress.yaml） | 新規作成 |
+| `.github/workflows/deploy-dev.yml`, `deploy-stg.yml`, `deploy-prod.yml` | 新規作成 |
+| `kigawa01/k8s-system` の `apps/kaft-dev-appset.yml`, `apps/kaft-stg-app.yml`, `apps/kaft-main-app.yml` | 新規作成（別リポジトリ） |
+| `kigawa-net/infra` の `hardware/cloudflare/r2.tf` | 変更（`kaft-dev`, `kaft-stg`バケット追加） |
