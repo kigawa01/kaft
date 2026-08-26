@@ -9,7 +9,7 @@ group = "net.kigawa.kaft"
 version = "0.0.1"
 
 application {
-    mainClass.set("net.kigawa.kaft.ApplicationKt")
+    mainClass.set("io.ktor.server.netty.EngineMain")
 }
 
 repositories {
