@@ -13,6 +13,7 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException
 import software.amazon.awssdk.services.s3.model.PutObjectRequest
+import software.amazon.awssdk.services.s3.model.S3Exception
 import java.net.URI
 
 class R2FileStorage(config: R2StorageConfig) : FileStorage {
@@ -82,5 +83,10 @@ class R2FileStorage(config: R2StorageConfig) : FileStorage {
         true
     } catch (e: NoSuchKeyException) {
         false
+    } catch (e: S3Exception) {
+        // HeadObjectの404は、レスポンスボディがないためNoSuchKeyExceptionに
+        // マッピングされず、汎用のS3Exceptionとして返ってくる場合がある
+        // （R2含む一部のS3互換実装で見られる挙動）。
+        if (e.statusCode() == 404) false else throw e
     }
 }
