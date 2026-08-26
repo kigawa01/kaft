@@ -8,6 +8,7 @@ import net.kigawa.kaft.auth.JwtService
 import net.kigawa.kaft.config.KaftConfig
 import net.kigawa.kaft.config.StorageConfig
 import net.kigawa.kaft.routes.configureFileRoutes
+import net.kigawa.kaft.routes.configureHealthRoutes
 import net.kigawa.kaft.routes.configureInternalRoutes
 import net.kigawa.kaft.storage.FileStorage
 import net.kigawa.kaft.storage.LocalFileStorage
@@ -33,6 +34,7 @@ fun Application.module() {
         }
     }
 
+    configureHealthRoutes()
     configureFileRoutes(jwtService, fileStorage)
     configureInternalRoutes(jwtService, fileStorage)
 }
