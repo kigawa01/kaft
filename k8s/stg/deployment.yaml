@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kaft
+  labels:
+    app: kaft
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kaft
+  template:
+    metadata:
+      name: kaft
+      labels:
+        app: kaft
+    spec:
+      imagePullSecrets:
+        - name: harbor-registry
+      containers:
+        - name: kaft
+          image: harbor.kigawa.net/private/kaft:stg-latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: KAFT_STORAGE_BACKEND
+              value: r2
+            - name: KAFT_STORAGE_R2_ACCOUNT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: kaft-r2
+                  key: accountId
+            - name: KAFT_STORAGE_R2_BUCKET
+              value: kaft-stg
+            - name: KAFT_STORAGE_R2_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: kaft-r2
+                  key: accessKeyId
+            - name: KAFT_STORAGE_R2_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kaft-r2
+                  key: secretAccessKey
+            - name: KAFT_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: kaft-jwt
+                  key: jwtSecret
+            - name: KAFT_JWT_ISSUER
+              value: kaft-stg
+            - name: KAFT_JWT_EXPIRATION_SECONDS
+              value: "3600"
+            - name: KAFT_INTERNAL_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: kaft-jwt
+                  key: internalJwtSecret
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kaft
+spec:
+  selector:
+    app: kaft
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
