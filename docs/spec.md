@@ -258,3 +258,43 @@ sequenceDiagram
 | `src/main/kotlin/storage/FileStorage.kt` | 新規作成 | ストレージ操作（UUID キー読み書き・削除・公開設定管理） |
 | `src/main/kotlin/auth/JwtService.kt` | 新規作成 | JWT 発行・検証ロジック |
 | `src/test/kotlin/` | 新規作成 | 各コンポーネントのテスト |
+
+---
+
+## R2ストレージバックエンドの追加（refs #12）
+
+### 概要
+
+現在の `FileStorage` はローカルファイルシステム専用の実装になっている。Cloudflare R2（S3互換オブジェクトストレージ）をバックエンドとして選択できるよう、ストレージ層を抽象化する。既存の PENDING/CONFIRMED 状態管理・可視性（public/private）管理の振る舞いは変更しない。
+
+### 設計方針
+
+| 項目 | 方針 |
+|---|---|
+| 抽象化 | `FileStorage` を interface 化し、`LocalFileStorage`（既存実装をリネーム）と `R2FileStorage`（新規）を用意する |
+| 切り替え | 設定値 `kaft.storage.backend`（`local` または `r2`）で選択する。デフォルトは `local`（既存の挙動を壊さない） |
+| R2クライアント | AWS SDK for Kotlin/Java の S3 クライアント（`software.amazon.awssdk:s3`）を使い、endpoint を R2 のエンドポイント（`https://<accountId>.r2.cloudflarestorage.com`）に差し替える（R2 は S3 互換 API を提供するため） |
+| メタデータ | `meta.json` 相当の `FileMeta`（state, visibility）はオブジェクトのメタデータ（S3 Object Metadata）またはオブジェクトキー `{uuid}/meta.json` として別途保存する（後者を採用し、既存のローカル実装と対称的な構造を保つ） |
+| オブジェクトキー | データ本体: `{uuid}/data`、メタデータ: `{uuid}/meta.json`（ローカル実装のディレクトリ構造と対応させる） |
+
+### 設定項目（R2バックエンド利用時）
+
+| 環境変数 | 説明 |
+|---|---|
+| `KAFT_STORAGE_BACKEND` | `local` または `r2` |
+| `KAFT_R2_ACCOUNT_ID` | CloudflareアカウントID（エンドポイントURL組み立てに使用） |
+| `KAFT_R2_BUCKET` | バケット名 |
+| `KAFT_R2_ACCESS_KEY_ID` | R2 APIトークンのAccess Key ID |
+| `KAFT_R2_SECRET_ACCESS_KEY` | R2 APIトークンのSecret Access Key |
+
+### 作成・変更ファイル一覧（#12）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `build.gradle.kts` | 変更 | `software.amazon.awssdk:s3` 依存を追加 |
+| `src/main/kotlin/net/kigawa/kaft/storage/FileStorage.kt` | 変更 | interface化。`FileMeta`/`FileState`/`Visibility` は共通のまま維持 |
+| `src/main/kotlin/net/kigawa/kaft/storage/LocalFileStorage.kt` | 新規作成 | 既存実装を移動（クラス名変更のみ、ロジックは変更しない） |
+| `src/main/kotlin/net/kigawa/kaft/storage/R2FileStorage.kt` | 新規作成 | S3互換クライアントによるR2実装 |
+| `src/main/kotlin/net/kigawa/kaft/config/KaftConfig.kt` | 変更 | ストレージ関連設定を `StorageConfig`（backend種別 + local/r2それぞれの設定）に拡張 |
+| `src/main/kotlin/net/kigawa/kaft/Application.kt` | 変更 | `StorageConfig` に応じて `LocalFileStorage`/`R2FileStorage` を選択して生成する |
+| `src/test/kotlin/.../storage/R2FileStorageTest.kt` | 新規作成 | R2互換のモック/ローカルS3実装（例: 既存のS3互換テストダブル）を用いたテスト、または単体では検証できない部分は手動確認とする |
