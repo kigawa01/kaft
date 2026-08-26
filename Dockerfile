@@ -1,7 +1,7 @@
-FROM gradle:8-jdk21-alpine AS builder
+FROM gradle:8.14-jdk21-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN gradle shadowJar --no-daemon
+RUN gradle shadowJar --no-daemon --console=plain
 
 FROM eclipse-temurin:21-jre-alpine
 RUN addgroup -S kaft && adduser -S kaft -G kaft
