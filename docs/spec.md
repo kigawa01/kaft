@@ -1,5 +1,117 @@
 # kaft 設計・仕様規約
 
+## アップロード時の存在確認と作成をatomicにする（refs #20）
+
+### 概要
+
+現在のアップロード処理は `fileStorage.exists(id)` の後に `fileStorage.savePending(id, data)` を呼び出しており、
+同一UUIDへの並行アップロードでTOCTOU raceが発生し得る。`FileStorage`に「存在確認＋作成」を一体化した
+atomic create APIを導入する。
+
+### 設計方針
+
+| 項目 | 方針 |
+|---|---|
+| API | `FileStorage.savePending(id, data)` を `createPending(id, data): CreateResult` に置き換える |
+| `CreateResult` | `sealed interface CreateResult { data object Created; data object AlreadyExists }`（issue記載のとおり） |
+| route側 | `FileRoutes.kt`の`PUT /files/{uuid}`で`exists()`事前チェックを廃止し、`createPending()`の結果だけで201/409を判定する |
+| 非同期化 | 本issueでは`suspend`化は行わない（#22でまとめて対応するスコープ）。既存の同期APIのまま、backend内部でOS/ストレージレベルのatomic操作を使う |
+| Local backend | `Files.createDirectory(dir)`（複数形の`createDirectories`ではない）を使う。ディレクトリ作成はファイルシステムレベルでatomicなため、2つ目以降の呼び出しは`FileAlreadyExistsException`を受け取り`AlreadyExists`を返す。ディレクトリ作成に成功した呼び出しのみデータ・メタを書き込む |
+| R2 backend | S3互換の条件付き書き込み（`PutObjectRequest.ifNoneMatch("*")`）を`meta.json`オブジェクトへのPUTに使う。R2は2024年からConditional Writesをサポート済み。precondition failed（HTTP 412）を`AlreadyExists`として扱う。meta書き込みが成功した場合のみdataを書き込む（Local同様、"claim"を先に取ってからデータを書く順序にする） |
+| 既存の`exists()`メソッド | `confirm`/`delete`/`updateVisibility`の存在チェックとしてはそのまま維持する（本issueのスコープ外） |
+
+### 変更内容
+
+**`storage/FileStorage.kt`**
+
+```kotlin
+sealed interface CreateResult {
+    data object Created : CreateResult
+    data object AlreadyExists : CreateResult
+}
+
+interface FileStorage {
+    fun exists(id: FileId): Boolean
+    fun createPending(id: FileId, data: ByteArray): CreateResult
+    fun confirm(id: FileId)
+    fun getBytes(id: FileId): ByteArray?
+    fun getMeta(id: FileId): FileMeta?
+    fun delete(id: FileId)
+    fun updateVisibility(id: FileId, visibility: Visibility)
+}
+```
+
+**`storage/LocalFileStorage.kt`**
+
+```kotlin
+override fun createPending(id: FileId, data: ByteArray): CreateResult {
+    try {
+        Files.createDirectory(fileDir(id))
+    } catch (e: FileAlreadyExistsException) {
+        return CreateResult.AlreadyExists
+    }
+    Files.write(dataPath(id), data)
+    writeMeta(id, FileMeta(state = FileState.PENDING, visibility = Visibility.PRIVATE))
+    return CreateResult.Created
+}
+```
+
+**`storage/R2FileStorage.kt`**
+
+```kotlin
+override fun createPending(id: FileId, data: ByteArray): CreateResult {
+    try {
+        client.putObject(
+            PutObjectRequest.builder().bucket(bucket).key(metaKey(id)).ifNoneMatch("*").build(),
+            RequestBody.fromString(Json.encodeToString(FileMeta(state = FileState.PENDING, visibility = Visibility.PRIVATE))),
+        )
+    } catch (e: S3Exception) {
+        if (e.statusCode() == 412) return CreateResult.AlreadyExists else throw e
+    }
+    client.putObject(
+        PutObjectRequest.builder().bucket(bucket).key(dataKey(id)).build(),
+        RequestBody.fromBytes(data),
+    )
+    return CreateResult.Created
+}
+```
+
+**`routes/FileRoutes.kt`**
+
+```kotlin
+put("/files/{uuid}") {
+    val fileId = ...
+    val token = ...
+    if (!jwtService.verifyUploadToken(token, fileId.toString())) return@put call.respond(Unauthorized)
+
+    val data = call.receive<ByteArray>()
+    when (fileStorage.createPending(fileId, data)) {
+        is CreateResult.Created -> call.respond(HttpStatusCode.Created)
+        is CreateResult.AlreadyExists -> call.respond(HttpStatusCode.Conflict)
+    }
+}
+```
+
+### テスト
+
+- `LocalFileStorageTest.kt`（新規）
+  - 新規IDへの`createPending` → `Created`、`exists()`が`true`になる
+  - 既存IDへの`createPending`（逐次2回目） → `AlreadyExists`
+  - 複数スレッドから同一IDへ同時に`createPending`を呼び出し、`Created`になるのはちょうど1件であることを確認
+- `FileRoutesTest.kt`の既存`duplicate upload returns 409`テストは新しい`createPending`経由でも通ることを確認する
+
+### 作成・変更ファイル一覧（#20）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `src/main/kotlin/net/kigawa/kaft/storage/FileStorage.kt` | 更新 | `CreateResult`追加、`savePending`を`createPending`に置き換え |
+| `src/main/kotlin/net/kigawa/kaft/storage/LocalFileStorage.kt` | 更新 | `Files.createDirectory`によるatomic create |
+| `src/main/kotlin/net/kigawa/kaft/storage/R2FileStorage.kt` | 更新 | `ifNoneMatch("*")`によるatomic create |
+| `src/main/kotlin/net/kigawa/kaft/routes/FileRoutes.kt` | 更新 | `exists()`事前チェックを廃止し`createPending()`の結果で分岐 |
+| `src/test/kotlin/net/kigawa/kaft/storage/LocalFileStorageTest.kt` | 新規作成 | 逐次・並行createPendingのテスト |
+
+---
+
 ## ファイルIDをUUID型として検証・扱う（refs #19）
 
 ### 概要
