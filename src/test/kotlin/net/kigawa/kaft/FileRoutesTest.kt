@@ -5,13 +5,17 @@ import com.auth0.jwt.algorithms.Algorithm
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import io.ktor.http.content.OutgoingContent
 import io.ktor.server.testing.*
+import io.ktor.utils.io.ByteWriteChannel
+import io.ktor.utils.io.writeStringUtf8
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
 import java.util.*
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 class FileRoutesTest {
 
@@ -109,6 +113,49 @@ class FileRoutesTest {
         val response = client.get("/files/$uuid/file.bin")
         assertEquals(HttpStatusCode.OK, response.status)
         assertEquals(ContentType.Application.OctetStream, response.contentType())
+    }
+
+    @Test
+    fun `upload and download large file streams correctly`() = testApp {
+        val uuid = UUID.randomUUID().toString()
+        val uploadToken = issueUploadToken(uuid)
+        val internalToken = issueInternalToken()
+        val data = ByteArray(8 * 1024 * 1024) { (it % 251).toByte() }
+
+        val uploadResponse = client.put("/files/$uuid") {
+            header(HttpHeaders.Authorization, "Bearer $uploadToken")
+            setBody(data)
+        }
+        assertEquals(HttpStatusCode.Created, uploadResponse.status)
+
+        client.post("/internal/files/$uuid/confirm") {
+            header(HttpHeaders.Authorization, "Bearer $internalToken")
+        }
+        client.patch("/internal/files/$uuid/visibility") {
+            header(HttpHeaders.Authorization, "Bearer $internalToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"visibility":"public"}""")
+        }
+
+        val downloadResponse = client.get("/files/$uuid/large.bin")
+        assertEquals(HttpStatusCode.OK, downloadResponse.status)
+        assertTrue(data.contentEquals(downloadResponse.bodyAsBytes()))
+    }
+
+    @Test
+    fun `upload without content-length returns 411`() = testApp {
+        val uuid = UUID.randomUUID().toString()
+        val uploadToken = issueUploadToken(uuid)
+
+        val response = client.put("/files/$uuid") {
+            header(HttpHeaders.Authorization, "Bearer $uploadToken")
+            setBody(object : OutgoingContent.WriteChannelContent() {
+                override suspend fun writeTo(channel: ByteWriteChannel) {
+                    channel.writeStringUtf8("chunked body without content-length")
+                }
+            })
+        }
+        assertEquals(HttpStatusCode.LengthRequired, response.status)
     }
 
     @Test

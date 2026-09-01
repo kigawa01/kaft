@@ -5,6 +5,7 @@ import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import io.ktor.utils.io.copyTo
 import net.kigawa.kaft.auth.JwtService
 import net.kigawa.kaft.storage.CreateResult
 import net.kigawa.kaft.storage.FileId
@@ -26,9 +27,10 @@ fun Application.configureFileRoutes(jwtService: JwtService, fileStorage: FileSto
                 return@put call.respond(HttpStatusCode.Unauthorized)
             }
 
-            val data = call.receive<ByteArray>()
+            val size = call.request.contentLength()
+                ?: return@put call.respond(HttpStatusCode.LengthRequired)
             val contentType = call.request.headers[HttpHeaders.ContentType] ?: DEFAULT_CONTENT_TYPE
-            when (fileStorage.createPending(fileId, data, contentType)) {
+            when (fileStorage.createPending(fileId, call.receiveChannel(), size, contentType)) {
                 CreateResult.Created -> call.respond(HttpStatusCode.Created)
                 CreateResult.AlreadyExists -> call.respond(HttpStatusCode.Conflict)
             }
@@ -53,7 +55,7 @@ fun Application.configureFileRoutes(jwtService: JwtService, fileStorage: FileSto
                 }
             }
 
-            val data = fileStorage.getBytes(fileId) ?: return@get call.respond(HttpStatusCode.NotFound)
+            val channel = fileStorage.openReadChannel(fileId) ?: return@get call.respond(HttpStatusCode.NotFound)
 
             call.response.header(
                 HttpHeaders.ContentDisposition,
@@ -64,7 +66,9 @@ fun Application.configureFileRoutes(jwtService: JwtService, fileStorage: FileSto
                 call.response.header(HttpHeaders.CacheControl, "public, max-age=31536000, immutable")
             }
 
-            call.respondBytes(data, ContentType.parse(meta.contentType))
+            call.respondBytesWriter(contentType = ContentType.parse(meta.contentType), contentLength = meta.size) {
+                channel.copyTo(this)
+            }
         }
     }
 }

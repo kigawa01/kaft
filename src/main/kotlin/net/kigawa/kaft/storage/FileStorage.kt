@@ -1,5 +1,6 @@
 package net.kigawa.kaft.storage
 
+import io.ktor.utils.io.ByteReadChannel
 import kotlinx.serialization.Serializable
 
 enum class FileState { PENDING, CONFIRMED }
@@ -20,10 +21,10 @@ sealed interface CreateResult {
 
 interface FileStorage {
     fun exists(id: FileId): Boolean
-    fun createPending(id: FileId, data: ByteArray, contentType: String): CreateResult
+    suspend fun createPending(id: FileId, data: ByteReadChannel, size: Long, contentType: String): CreateResult
     fun confirm(id: FileId)
-    fun getBytes(id: FileId): ByteArray?
     fun getMeta(id: FileId): FileMeta?
     fun delete(id: FileId)
     fun updateVisibility(id: FileId, visibility: Visibility)
+    fun openReadChannel(id: FileId): ByteReadChannel?
 }

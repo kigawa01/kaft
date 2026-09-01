@@ -1,5 +1,8 @@
 package net.kigawa.kaft.storage
 
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.toByteArray
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
 import java.util.UUID
@@ -15,12 +18,15 @@ class LocalFileStorageTest {
     @TempDir
     lateinit var tempDir: Path
 
+    private fun createPending(storage: LocalFileStorage, id: FileId, data: ByteArray, contentType: String) =
+        runBlocking { storage.createPending(id, ByteReadChannel(data), data.size.toLong(), contentType) }
+
     @Test
     fun `createPending on new id succeeds`() {
         val storage = LocalFileStorage(tempDir)
         val id = FileId(UUID.randomUUID())
 
-        val result = storage.createPending(id, "data".toByteArray(), "text/plain")
+        val result = createPending(storage, id, "data".toByteArray(), "text/plain")
 
         assertEquals(CreateResult.Created, result)
         assertTrue(storage.exists(id))
@@ -30,12 +36,13 @@ class LocalFileStorageTest {
     fun `createPending on existing id returns AlreadyExists`() {
         val storage = LocalFileStorage(tempDir)
         val id = FileId(UUID.randomUUID())
-        storage.createPending(id, "first".toByteArray(), "text/plain")
+        createPending(storage, id, "first".toByteArray(), "text/plain")
 
-        val result = storage.createPending(id, "second".toByteArray(), "text/plain")
+        val result = createPending(storage, id, "second".toByteArray(), "text/plain")
 
         assertEquals(CreateResult.AlreadyExists, result)
-        assertEquals("first", String(storage.getBytes(id)!!))
+        val bytes = runBlocking { storage.openReadChannel(id)!!.toByteArray() }
+        assertEquals("first", String(bytes))
     }
 
     @Test
@@ -44,11 +51,23 @@ class LocalFileStorageTest {
         val id = FileId(UUID.randomUUID())
         val data = "image-bytes".toByteArray()
 
-        storage.createPending(id, data, "image/png")
+        createPending(storage, id, data, "image/png")
 
         val meta = storage.getMeta(id)!!
         assertEquals("image/png", meta.contentType)
         assertEquals(data.size.toLong(), meta.size)
+    }
+
+    @Test
+    fun `createPending writes data retrievable via openReadChannel`() {
+        val storage = LocalFileStorage(tempDir)
+        val id = FileId(UUID.randomUUID())
+        val data = ByteArray(5 * 1024 * 1024) { (it % 251).toByte() }
+
+        createPending(storage, id, data, "application/octet-stream")
+
+        val readBack = runBlocking { storage.openReadChannel(id)!!.toByteArray() }
+        assertTrue(data.contentEquals(readBack))
     }
 
     @Test
@@ -64,7 +83,7 @@ class LocalFileStorageTest {
             executor.submit<CreateResult> {
                 readyLatch.countDown()
                 startLatch.await()
-                storage.createPending(id, "data-$it".toByteArray(), "text/plain")
+                createPending(storage, id, "data-$it".toByteArray(), "text/plain")
             }
         }
 
@@ -81,7 +100,7 @@ class LocalFileStorageTest {
     fun `concurrent confirm and updateVisibility do not lose updates`() {
         val storage = LocalFileStorage(tempDir)
         val id = FileId(UUID.randomUUID())
-        storage.createPending(id, "data".toByteArray(), "text/plain")
+        createPending(storage, id, "data".toByteArray(), "text/plain")
 
         val startLatch = CountDownLatch(1)
         val executor = Executors.newFixedThreadPool(2)
