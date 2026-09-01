@@ -1,5 +1,97 @@
 # kaft 設計・仕様規約
 
+## Internal JWTのissuer・audience検証（refs #23）
+
+### 概要
+
+現在の Internal JWT verifier（`JwtService.internalVerifier`）は署名と `scope=internal` claimのみを検証しており、
+`iss`（issuer）・`aud`（audience）を検証していない。API Server → kaft のサーバー間認証の境界を明確にするため、
+issuer・audienceの検証を必須化する。
+
+### 設計方針
+
+| 項目 | 方針 |
+|---|---|
+| issuer検証 | `InternalConfig.issuer` に設定された値と一致することを要求する |
+| audience検証 | `InternalConfig.audience` に設定された値と一致することを要求する |
+| 設定方法 | 既存の`kaft.internal.*`設定と同様、`application.conf` + 環境変数で設定可能にする（ハードコード禁止というdev.mdの規約に従う） |
+| デフォルト値 | issuer: `api-server` / audience: `kaft`（`docs/spec.md`のJWTペイロード設計例に合わせる） |
+| scope検証 | 既存の`withClaim("scope", "internal")`をそのまま維持 |
+| 有効期限検証 | auth0 java-jwtライブラリの標準検証（`verify()`時に自動でexpiredを拒否）をそのまま利用。追加実装は不要 |
+
+### 影響範囲・注意点
+
+- **既存のInternal JWT発行者（API Server側）は `iss`・`aud` claimを新たに含める必要がある。** 現時点でkaft自身はInternal JWTを発行していない（テストコードのみ）ため、実際にAPI Serverを運用している場合はこの変更に合わせて発行ロジックの追随が必要になる
+- k8sのdev/stg/main環境では新しい環境変数を明示的に設定しない限りデフォルト値（`api-server` / `kaft`）が使われる
+
+### 変更内容
+
+**`KaftConfig.kt`**
+
+```kotlin
+data class InternalConfig(
+    val jwtSecret: String,
+    val issuer: String,
+    val audience: String,
+)
+```
+
+- `kaft.internal.issuer`（環境変数 `KAFT_INTERNAL_JWT_ISSUER`、デフォルト `api-server`）
+- `kaft.internal.audience`（環境変数 `KAFT_INTERNAL_JWT_AUDIENCE`、デフォルト `kaft`）
+
+**`application.conf`**
+
+```hocon
+internal {
+    jwtSecret = "change-this-internal-secret-in-production"
+    jwtSecret = ${?KAFT_INTERNAL_JWT_SECRET}
+    issuer = "api-server"
+    issuer = ${?KAFT_INTERNAL_JWT_ISSUER}
+    audience = "kaft"
+    audience = ${?KAFT_INTERNAL_JWT_AUDIENCE}
+}
+```
+
+**`JwtService.kt`**
+
+```kotlin
+private val internalVerifier = JWT.require(internalAlgorithm)
+    .withIssuer(internalConfig.issuer)
+    .withAudience(internalConfig.audience)
+    .withClaim("scope", "internal")
+    .build()
+```
+
+**`TestHelpers.kt`**
+
+- `TEST_INTERNAL_ISSUER` / `TEST_INTERNAL_AUDIENCE` 定数を追加
+- `createTestConfig()` に `kaft.internal.issuer` / `kaft.internal.audience` を追加
+- `issueInternalToken()` に `.withIssuer(TEST_INTERNAL_ISSUER)` / `.withAudience(TEST_INTERNAL_AUDIENCE)` を追加
+
+### テスト
+
+新規 `JwtServiceTest.kt` を作成し、`JwtService.verifyInternalToken()` を直接検証する。
+
+- issuer不一致のトークン → 拒否（false）
+- audience不一致のトークン → 拒否（false）
+- scope不一致のトークン → 拒否（false、既存動作の回帰確認）
+- 期限切れのトークン → 拒否（false）
+- issuer・audience・scope・期限すべて正しいトークン → 許可（true）
+
+既存の `FileRoutesTest.kt`（`issueInternalToken()`経由）は `TestHelpers.kt` 更新後も無変更で通ることを確認する。
+
+### 作成・変更ファイル一覧（#23）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `src/main/kotlin/net/kigawa/kaft/config/KaftConfig.kt` | 更新 | `InternalConfig`に`issuer`・`audience`を追加 |
+| `src/main/resources/application.conf` | 更新 | `kaft.internal.issuer`・`kaft.internal.audience`を追加 |
+| `src/main/kotlin/net/kigawa/kaft/auth/JwtService.kt` | 更新 | `internalVerifier`にissuer・audience検証を追加 |
+| `src/test/kotlin/net/kigawa/kaft/TestHelpers.kt` | 更新 | テスト用issuer・audience定数とトークン発行の追随 |
+| `src/test/kotlin/net/kigawa/kaft/auth/JwtServiceTest.kt` | 新規作成 | issuer/audience/scope/期限の検証テスト |
+
+---
+
 ## デフォルトJWT secretによる起動禁止（refs #27）
 
 ### 概要
