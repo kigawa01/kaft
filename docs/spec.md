@@ -1,5 +1,93 @@
 # kaft 設計・仕様規約
 
+## R2メタデータ更新の競合によるlost updateを防止する（refs #24）
+
+### 概要
+
+R2 backendでは`meta.json`に`state`と`visibility`をまとめて保存しており、`confirm`/`updateVisibility`が
+read-modify-writeで実装されているため、並行更新時に一方の変更がもう一方を上書きするlost updateが
+発生し得る（例: confirmとvisibility更新が競合すると`CONFIRMED`が`PENDING`に戻ってしまう）。
+
+### 設計方針
+
+| 項目 | 方針 |
+|---|---|
+| R2 backend | ETagを使ったoptimistic concurrency control（CAS）で解決する。`meta.json`取得時にETagを取得し、更新時に`PutObjectRequest.ifMatch(etag)`で条件付き書き込みを行う。412 Precondition Failed（ETag不一致＝競合）の場合は再読み込みして再試行する（最大リトライ回数を設ける） |
+| Local backend | 単一プロセス内のスレッド競合が原因のため、`FileId`ごとの`synchronized`ロックで`confirm`/`updateVisibility`のread-modify-writeを直列化する。ネットワーク越しの複数ノード競合はそもそも発生しないため、R2のような条件付き書き込みは不要 |
+| リトライ上限超過時 | `IllegalStateException`を送出する（既存の`error("File not found: ...")`と同様のスタイル） |
+| 非同期化 | 本issueでは`suspend`化は行わない（#22のスコープ） |
+| `createPending`（#20で導入済み） | 既にatomicな作成のため対象外。本issueは`confirm`/`updateVisibility`のみが対象 |
+
+### 変更内容
+
+**`storage/R2FileStorage.kt`**
+
+```kotlin
+private fun getMetaWithETag(id: FileId): Pair<FileMeta, String>? {
+    if (!headExists(metaKey(id))) return null
+    return client.getObject(GetObjectRequest.builder().bucket(bucket).key(metaKey(id)).build()).use {
+        Json.decodeFromString<FileMeta>(String(it.readAllBytes())) to it.response().eTag()
+    }
+}
+
+private fun updateMetaWithRetry(id: FileId, retries: Int = 5, transform: (FileMeta) -> FileMeta) {
+    repeat(retries) {
+        val (meta, etag) = getMetaWithETag(id) ?: error("File not found: $id")
+        try {
+            client.putObject(
+                PutObjectRequest.builder().bucket(bucket).key(metaKey(id)).ifMatch(etag).build(),
+                RequestBody.fromString(Json.encodeToString(transform(meta))),
+            )
+            return
+        } catch (e: S3Exception) {
+            if (e.statusCode() != 412) throw e
+            // ETag不一致(競合) -> 再読み込みして再試行
+        }
+    }
+    error("Failed to update metadata for $id: too many concurrent conflicts")
+}
+
+override fun confirm(id: FileId) = updateMetaWithRetry(id) { it.copy(state = FileState.CONFIRMED) }
+
+override fun updateVisibility(id: FileId, visibility: Visibility) =
+    updateMetaWithRetry(id) { it.copy(visibility = visibility) }
+```
+
+- 既存の`getMeta(id)`は`getMetaWithETag(id)?.first`を返すように内部実装を共通化する
+
+**`storage/LocalFileStorage.kt`**
+
+```kotlin
+private val locks = ConcurrentHashMap<FileId, Any>()
+private fun lockFor(id: FileId): Any = locks.computeIfAbsent(id) { Any() }
+
+override fun confirm(id: FileId) = synchronized(lockFor(id)) {
+    val meta = getMeta(id) ?: error("File not found: $id")
+    writeMeta(id, meta.copy(state = FileState.CONFIRMED))
+}
+
+override fun updateVisibility(id: FileId, visibility: Visibility) = synchronized(lockFor(id)) {
+    val meta = getMeta(id) ?: error("File not found: $id")
+    writeMeta(id, meta.copy(visibility = visibility))
+}
+```
+
+### テスト
+
+- `LocalFileStorageTest.kt`（新規テストケース追加）
+  - `confirm`と`updateVisibility(PUBLIC)`を2スレッドから同時に実行し、完了後に`state == CONFIRMED`かつ`visibility == PUBLIC`（どちらも失われていない）ことを確認する
+- R2 backendについては、リポジトリに既存のS3Client mock/テストインフラが存在しないため、本issueでは自動テストの追加を見送る（Local側のロジックとR2側のCASロジックは対称的な設計であり、レビューで論理的に確認する）
+
+### 作成・変更ファイル一覧（#24）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `src/main/kotlin/net/kigawa/kaft/storage/R2FileStorage.kt` | 更新 | ETagベースのCASで`confirm`/`updateVisibility`を実装 |
+| `src/main/kotlin/net/kigawa/kaft/storage/LocalFileStorage.kt` | 更新 | `FileId`ごとの`synchronized`ロックで直列化 |
+| `src/test/kotlin/net/kigawa/kaft/storage/LocalFileStorageTest.kt` | 更新 | 並行confirm/updateVisibilityのlost updateテストを追加 |
+
+---
+
 ## ファイルのContent-Typeとサイズをメタデータとして保持する（refs #25）
 
 ### 概要
