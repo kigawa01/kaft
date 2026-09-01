@@ -35,12 +35,19 @@ class R2FileStorage(config: R2StorageConfig) : FileStorage {
 
     override fun exists(id: FileId): Boolean = headExists(metaKey(id))
 
-    override fun createPending(id: FileId, data: ByteArray): CreateResult {
+    override fun createPending(id: FileId, data: ByteArray, contentType: String): CreateResult {
         try {
             client.putObject(
                 PutObjectRequest.builder().bucket(bucket).key(metaKey(id)).ifNoneMatch("*").build(),
                 RequestBody.fromString(
-                    Json.encodeToString(FileMeta(state = FileState.PENDING, visibility = Visibility.PRIVATE)),
+                    Json.encodeToString(
+                        FileMeta(
+                            state = FileState.PENDING,
+                            visibility = Visibility.PRIVATE,
+                            contentType = contentType,
+                            size = data.size.toLong(),
+                        ),
+                    ),
                 ),
             )
         } catch (e: S3Exception) {

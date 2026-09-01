@@ -20,7 +20,7 @@ class LocalFileStorageTest {
         val storage = LocalFileStorage(tempDir)
         val id = FileId(UUID.randomUUID())
 
-        val result = storage.createPending(id, "data".toByteArray())
+        val result = storage.createPending(id, "data".toByteArray(), "text/plain")
 
         assertEquals(CreateResult.Created, result)
         assertTrue(storage.exists(id))
@@ -30,12 +30,25 @@ class LocalFileStorageTest {
     fun `createPending on existing id returns AlreadyExists`() {
         val storage = LocalFileStorage(tempDir)
         val id = FileId(UUID.randomUUID())
-        storage.createPending(id, "first".toByteArray())
+        storage.createPending(id, "first".toByteArray(), "text/plain")
 
-        val result = storage.createPending(id, "second".toByteArray())
+        val result = storage.createPending(id, "second".toByteArray(), "text/plain")
 
         assertEquals(CreateResult.AlreadyExists, result)
         assertEquals("first", String(storage.getBytes(id)!!))
+    }
+
+    @Test
+    fun `createPending stores contentType and size in meta`() {
+        val storage = LocalFileStorage(tempDir)
+        val id = FileId(UUID.randomUUID())
+        val data = "image-bytes".toByteArray()
+
+        storage.createPending(id, data, "image/png")
+
+        val meta = storage.getMeta(id)!!
+        assertEquals("image/png", meta.contentType)
+        assertEquals(data.size.toLong(), meta.size)
     }
 
     @Test
@@ -51,7 +64,7 @@ class LocalFileStorageTest {
             executor.submit<CreateResult> {
                 readyLatch.countDown()
                 startLatch.await()
-                storage.createPending(id, "data-$it".toByteArray())
+                storage.createPending(id, "data-$it".toByteArray(), "text/plain")
             }
         }
 

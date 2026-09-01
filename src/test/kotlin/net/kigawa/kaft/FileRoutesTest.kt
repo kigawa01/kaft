@@ -63,6 +63,55 @@ class FileRoutesTest {
     }
 
     @Test
+    fun `download returns stored content type`() = testApp {
+        val uuid = UUID.randomUUID().toString()
+        val uploadToken = issueUploadToken(uuid)
+        val internalToken = issueInternalToken()
+
+        client.put("/files/$uuid") {
+            header(HttpHeaders.Authorization, "Bearer $uploadToken")
+            contentType(ContentType.Image.PNG)
+            setBody("fake-png-bytes".toByteArray())
+        }
+        client.post("/internal/files/$uuid/confirm") {
+            header(HttpHeaders.Authorization, "Bearer $internalToken")
+        }
+        client.patch("/internal/files/$uuid/visibility") {
+            header(HttpHeaders.Authorization, "Bearer $internalToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"visibility":"public"}""")
+        }
+
+        val response = client.get("/files/$uuid/photo.png")
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(ContentType.Image.PNG, response.contentType())
+    }
+
+    @Test
+    fun `download falls back to octet-stream when content type was not specified`() = testApp {
+        val uuid = UUID.randomUUID().toString()
+        val uploadToken = issueUploadToken(uuid)
+        val internalToken = issueInternalToken()
+
+        client.put("/files/$uuid") {
+            header(HttpHeaders.Authorization, "Bearer $uploadToken")
+            setBody("no content type".toByteArray())
+        }
+        client.post("/internal/files/$uuid/confirm") {
+            header(HttpHeaders.Authorization, "Bearer $internalToken")
+        }
+        client.patch("/internal/files/$uuid/visibility") {
+            header(HttpHeaders.Authorization, "Bearer $internalToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"visibility":"public"}""")
+        }
+
+        val response = client.get("/files/$uuid/file.bin")
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(ContentType.Application.OctetStream, response.contentType())
+    }
+
+    @Test
     fun `upload fails with wrong uuid in token`() = testApp {
         val uuid = UUID.randomUUID().toString()
         val wrongToken = issueUploadToken(UUID.randomUUID().toString())

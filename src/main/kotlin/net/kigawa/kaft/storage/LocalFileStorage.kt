@@ -18,14 +18,22 @@ class LocalFileStorage(private val baseDir: Path) : FileStorage {
 
     override fun exists(id: FileId): Boolean = Files.exists(fileDir(id))
 
-    override fun createPending(id: FileId, data: ByteArray): CreateResult {
+    override fun createPending(id: FileId, data: ByteArray, contentType: String): CreateResult {
         try {
             Files.createDirectory(fileDir(id))
         } catch (_: FileAlreadyExistsException) {
             return CreateResult.AlreadyExists
         }
         Files.write(dataPath(id), data)
-        writeMeta(id, FileMeta(state = FileState.PENDING, visibility = Visibility.PRIVATE))
+        writeMeta(
+            id,
+            FileMeta(
+                state = FileState.PENDING,
+                visibility = Visibility.PRIVATE,
+                contentType = contentType,
+                size = data.size.toLong(),
+            ),
+        )
         return CreateResult.Created
     }
 
