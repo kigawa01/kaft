@@ -20,11 +20,11 @@ sealed interface CreateResult {
 }
 
 interface FileStorage {
-    fun exists(id: FileId): Boolean
+    suspend fun exists(id: FileId): Boolean
     suspend fun createPending(id: FileId, data: ByteReadChannel, size: Long, contentType: String): CreateResult
-    fun confirm(id: FileId)
-    fun getMeta(id: FileId): FileMeta?
-    fun delete(id: FileId)
-    fun updateVisibility(id: FileId, visibility: Visibility)
-    fun openReadChannel(id: FileId, range: LongRange? = null): ByteReadChannel?
+    suspend fun confirm(id: FileId)
+    suspend fun getMeta(id: FileId): FileMeta?
+    suspend fun delete(id: FileId)
+    suspend fun updateVisibility(id: FileId, visibility: Visibility)
+    suspend fun openReadChannel(id: FileId, range: LongRange? = null): ByteReadChannel?
 }

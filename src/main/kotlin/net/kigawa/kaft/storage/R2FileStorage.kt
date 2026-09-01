@@ -3,6 +3,8 @@ package net.kigawa.kaft.storage
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.jvm.javaio.toByteReadChannel
 import io.ktor.utils.io.jvm.javaio.toInputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import net.kigawa.kaft.config.R2StorageConfig
@@ -36,52 +38,56 @@ class R2FileStorage(config: R2StorageConfig) : FileStorage {
     private fun dataKey(id: FileId) = "$id/data"
     private fun metaKey(id: FileId) = "$id/meta.json"
 
-    override fun exists(id: FileId): Boolean = headExists(metaKey(id))
+    override suspend fun exists(id: FileId): Boolean = withContext(Dispatchers.IO) { headExists(metaKey(id)) }
 
-    override suspend fun createPending(id: FileId, data: ByteReadChannel, size: Long, contentType: String): CreateResult {
-        try {
-            client.putObject(
-                PutObjectRequest.builder().bucket(bucket).key(metaKey(id)).ifNoneMatch("*").build(),
-                RequestBody.fromString(
-                    Json.encodeToString(
-                        FileMeta(
-                            state = FileState.PENDING,
-                            visibility = Visibility.PRIVATE,
-                            contentType = contentType,
-                            size = size,
+    override suspend fun createPending(id: FileId, data: ByteReadChannel, size: Long, contentType: String): CreateResult =
+        withContext(Dispatchers.IO) {
+            try {
+                client.putObject(
+                    PutObjectRequest.builder().bucket(bucket).key(metaKey(id)).ifNoneMatch("*").build(),
+                    RequestBody.fromString(
+                        Json.encodeToString(
+                            FileMeta(
+                                state = FileState.PENDING,
+                                visibility = Visibility.PRIVATE,
+                                contentType = contentType,
+                                size = size,
+                            ),
                         ),
                     ),
-                ),
+                )
+            } catch (e: S3Exception) {
+                if (e.statusCode() == 412) return@withContext CreateResult.AlreadyExists else throw e
+            }
+            client.putObject(
+                PutObjectRequest.builder().bucket(bucket).key(dataKey(id)).build(),
+                RequestBody.fromInputStream(data.toInputStream(), size),
             )
-        } catch (e: S3Exception) {
-            if (e.statusCode() == 412) return CreateResult.AlreadyExists else throw e
+            CreateResult.Created
         }
-        client.putObject(
-            PutObjectRequest.builder().bucket(bucket).key(dataKey(id)).build(),
-            RequestBody.fromInputStream(data.toInputStream(), size),
-        )
-        return CreateResult.Created
+
+    override suspend fun confirm(id: FileId): Unit = withContext(Dispatchers.IO) {
+        updateMetaWithRetry(id) { it.copy(state = FileState.CONFIRMED) }
     }
 
-    override fun confirm(id: FileId) = updateMetaWithRetry(id) { it.copy(state = FileState.CONFIRMED) }
-
-    override fun openReadChannel(id: FileId, range: LongRange?): ByteReadChannel? {
-        if (!headExists(dataKey(id))) return null
+    override suspend fun openReadChannel(id: FileId, range: LongRange?): ByteReadChannel? = withContext(Dispatchers.IO) {
+        if (!headExists(dataKey(id))) return@withContext null
         val request = GetObjectRequest.builder().bucket(bucket).key(dataKey(id)).apply {
             if (range != null) range("bytes=${range.first}-${range.last}")
         }.build()
-        return client.getObject(request).toByteReadChannel()
+        client.getObject(request).toByteReadChannel()
     }
 
-    override fun getMeta(id: FileId): FileMeta? = getMetaWithETag(id)?.first
+    override suspend fun getMeta(id: FileId): FileMeta? = withContext(Dispatchers.IO) { getMetaWithETag(id)?.first }
 
-    override fun delete(id: FileId) {
+    override suspend fun delete(id: FileId): Unit = withContext(Dispatchers.IO) {
         client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(dataKey(id)).build())
         client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(metaKey(id)).build())
     }
 
-    override fun updateVisibility(id: FileId, visibility: Visibility) =
+    override suspend fun updateVisibility(id: FileId, visibility: Visibility): Unit = withContext(Dispatchers.IO) {
         updateMetaWithRetry(id) { it.copy(visibility = visibility) }
+    }
 
     private fun getMetaWithETag(id: FileId): Pair<FileMeta, String>? {
         if (!headExists(metaKey(id))) return null
