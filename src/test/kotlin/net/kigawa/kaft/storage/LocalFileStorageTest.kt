@@ -76,4 +76,31 @@ class LocalFileStorageTest {
         assertEquals(1, outcomes.count { it == CreateResult.Created })
         assertEquals(threadCount - 1, outcomes.count { it == CreateResult.AlreadyExists })
     }
+
+    @Test
+    fun `concurrent confirm and updateVisibility do not lose updates`() {
+        val storage = LocalFileStorage(tempDir)
+        val id = FileId(UUID.randomUUID())
+        storage.createPending(id, "data".toByteArray(), "text/plain")
+
+        val startLatch = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+        val confirmFuture = executor.submit {
+            startLatch.await()
+            storage.confirm(id)
+        }
+        val visibilityFuture = executor.submit {
+            startLatch.await()
+            storage.updateVisibility(id, Visibility.PUBLIC)
+        }
+
+        startLatch.countDown()
+        confirmFuture.get(5, TimeUnit.SECONDS)
+        visibilityFuture.get(5, TimeUnit.SECONDS)
+        executor.shutdown()
+
+        val meta = storage.getMeta(id)!!
+        assertEquals(FileState.CONFIRMED, meta.state)
+        assertEquals(Visibility.PUBLIC, meta.visibility)
+    }
 }

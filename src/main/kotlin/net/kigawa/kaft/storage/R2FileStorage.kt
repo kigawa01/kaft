@@ -60,10 +60,7 @@ class R2FileStorage(config: R2StorageConfig) : FileStorage {
         return CreateResult.Created
     }
 
-    override fun confirm(id: FileId) {
-        val meta = getMeta(id) ?: error("File not found: $id")
-        writeMeta(id, meta.copy(state = FileState.CONFIRMED))
-    }
+    override fun confirm(id: FileId) = updateMetaWithRetry(id) { it.copy(state = FileState.CONFIRMED) }
 
     override fun getBytes(id: FileId): ByteArray? {
         if (!headExists(dataKey(id))) return null
@@ -71,28 +68,38 @@ class R2FileStorage(config: R2StorageConfig) : FileStorage {
             .use { it.readAllBytes() }
     }
 
-    override fun getMeta(id: FileId): FileMeta? {
-        if (!headExists(metaKey(id))) return null
-        val json = client.getObject(GetObjectRequest.builder().bucket(bucket).key(metaKey(id)).build())
-            .use { it.readAllBytes() }
-        return Json.decodeFromString(String(json))
-    }
+    override fun getMeta(id: FileId): FileMeta? = getMetaWithETag(id)?.first
 
     override fun delete(id: FileId) {
         client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(dataKey(id)).build())
         client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(metaKey(id)).build())
     }
 
-    override fun updateVisibility(id: FileId, visibility: Visibility) {
-        val meta = getMeta(id) ?: error("File not found: $id")
-        writeMeta(id, meta.copy(visibility = visibility))
+    override fun updateVisibility(id: FileId, visibility: Visibility) =
+        updateMetaWithRetry(id) { it.copy(visibility = visibility) }
+
+    private fun getMetaWithETag(id: FileId): Pair<FileMeta, String>? {
+        if (!headExists(metaKey(id))) return null
+        return client.getObject(GetObjectRequest.builder().bucket(bucket).key(metaKey(id)).build()).use {
+            Json.decodeFromString<FileMeta>(String(it.readAllBytes())) to it.response().eTag()
+        }
     }
 
-    private fun writeMeta(id: FileId, meta: FileMeta) {
-        client.putObject(
-            PutObjectRequest.builder().bucket(bucket).key(metaKey(id)).build(),
-            RequestBody.fromString(Json.encodeToString(meta)),
-        )
+    private fun updateMetaWithRetry(id: FileId, retries: Int = 5, transform: (FileMeta) -> FileMeta) {
+        repeat(retries) {
+            val (meta, etag) = getMetaWithETag(id) ?: error("File not found: $id")
+            try {
+                client.putObject(
+                    PutObjectRequest.builder().bucket(bucket).key(metaKey(id)).ifMatch(etag).build(),
+                    RequestBody.fromString(Json.encodeToString(transform(meta))),
+                )
+                return
+            } catch (e: S3Exception) {
+                if (e.statusCode() != 412) throw e
+                // ETag不一致(競合) -> 再読み込みして再試行
+            }
+        }
+        error("Failed to update metadata for $id: too many concurrent conflicts")
     }
 
     private fun headExists(key: String): Boolean = try {
