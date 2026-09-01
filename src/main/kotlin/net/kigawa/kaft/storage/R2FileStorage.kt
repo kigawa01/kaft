@@ -1,5 +1,8 @@
 package net.kigawa.kaft.storage
 
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.jvm.javaio.toByteReadChannel
+import io.ktor.utils.io.jvm.javaio.toInputStream
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import net.kigawa.kaft.config.R2StorageConfig
@@ -35,7 +38,7 @@ class R2FileStorage(config: R2StorageConfig) : FileStorage {
 
     override fun exists(id: FileId): Boolean = headExists(metaKey(id))
 
-    override fun createPending(id: FileId, data: ByteArray, contentType: String): CreateResult {
+    override suspend fun createPending(id: FileId, data: ByteReadChannel, size: Long, contentType: String): CreateResult {
         try {
             client.putObject(
                 PutObjectRequest.builder().bucket(bucket).key(metaKey(id)).ifNoneMatch("*").build(),
@@ -45,7 +48,7 @@ class R2FileStorage(config: R2StorageConfig) : FileStorage {
                             state = FileState.PENDING,
                             visibility = Visibility.PRIVATE,
                             contentType = contentType,
-                            size = data.size.toLong(),
+                            size = size,
                         ),
                     ),
                 ),
@@ -55,17 +58,16 @@ class R2FileStorage(config: R2StorageConfig) : FileStorage {
         }
         client.putObject(
             PutObjectRequest.builder().bucket(bucket).key(dataKey(id)).build(),
-            RequestBody.fromBytes(data),
+            RequestBody.fromInputStream(data.toInputStream(), size),
         )
         return CreateResult.Created
     }
 
     override fun confirm(id: FileId) = updateMetaWithRetry(id) { it.copy(state = FileState.CONFIRMED) }
 
-    override fun getBytes(id: FileId): ByteArray? {
+    override fun openReadChannel(id: FileId): ByteReadChannel? {
         if (!headExists(dataKey(id))) return null
-        return client.getObject(GetObjectRequest.builder().bucket(bucket).key(dataKey(id)).build())
-            .use { it.readAllBytes() }
+        return client.getObject(GetObjectRequest.builder().bucket(bucket).key(dataKey(id)).build()).toByteReadChannel()
     }
 
     override fun getMeta(id: FileId): FileMeta? = getMetaWithETag(id)?.first

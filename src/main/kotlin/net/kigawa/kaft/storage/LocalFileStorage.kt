@@ -1,5 +1,8 @@
 package net.kigawa.kaft.storage
 
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.jvm.javaio.copyTo
+import io.ktor.utils.io.jvm.javaio.toByteReadChannel
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.nio.file.FileAlreadyExistsException
@@ -22,20 +25,20 @@ class LocalFileStorage(private val baseDir: Path) : FileStorage {
 
     override fun exists(id: FileId): Boolean = Files.exists(fileDir(id))
 
-    override fun createPending(id: FileId, data: ByteArray, contentType: String): CreateResult {
+    override suspend fun createPending(id: FileId, data: ByteReadChannel, size: Long, contentType: String): CreateResult {
         try {
             Files.createDirectory(fileDir(id))
         } catch (_: FileAlreadyExistsException) {
             return CreateResult.AlreadyExists
         }
-        Files.write(dataPath(id), data)
+        Files.newOutputStream(dataPath(id)).use { out -> data.copyTo(out) }
         writeMeta(
             id,
             FileMeta(
                 state = FileState.PENDING,
                 visibility = Visibility.PRIVATE,
                 contentType = contentType,
-                size = data.size.toLong(),
+                size = size,
             ),
         )
         return CreateResult.Created
@@ -46,8 +49,8 @@ class LocalFileStorage(private val baseDir: Path) : FileStorage {
         writeMeta(id, meta.copy(state = FileState.CONFIRMED))
     }
 
-    override fun getBytes(id: FileId): ByteArray? =
-        if (Files.exists(dataPath(id))) Files.readAllBytes(dataPath(id)) else null
+    override fun openReadChannel(id: FileId): ByteReadChannel? =
+        if (Files.exists(dataPath(id))) Files.newInputStream(dataPath(id)).toByteReadChannel() else null
 
     override fun getMeta(id: FileId): FileMeta? {
         val path = metaPath(id)
