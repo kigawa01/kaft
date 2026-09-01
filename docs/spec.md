@@ -1,5 +1,79 @@
 # kaft 設計・仕様規約
 
+## ファイルIDをUUID型として検証・扱う（refs #19）
+
+### 概要
+
+現在、`/files/{uuid}` などで受け取ったファイルIDを `String` のまま扱っており、`LocalFileStorage` では
+`baseDir.resolve(uuid)` にそのまま渡している。不正なUUID文字列を受理してしまい、Local backendでは
+任意文字列がパス解決に使われてしまう。ファイルIDはアプリケーション境界でUUIDとして検証し、
+`FileStorage` API全体で型として保証する。
+
+### 設計方針
+
+| 項目 | 方針 |
+|---|---|
+| 型 | `@JvmInline value class FileId(val value: UUID)` を `storage`パッケージに新規追加 |
+| 検証タイミング | route parameter受領時（`FileRoutes.kt`・`InternalRoutes.kt`の両方） |
+| 検証失敗時 | `400 Bad Request` |
+| `FileStorage`のAPI | 全メソッドの引数を `String` → `FileId` に変更する |
+| Local/R2 backend | ディレクトリ名・R2オブジェクトキーの構築を `FileId` 経由にする（`FileId.toString()`でUUID文字列を得る。既存のディレクトリ/キー命名と完全互換） |
+| JWT検証との連携 | `JwtService.verifyUploadToken`/`verifyReadToken` は現状どおり `String` を受け取るAPIのまま変更しない（本issueのスコープ外）。呼び出し側で `fileId.toString()` を渡す |
+| `/internal/token` の `TokenRequest.uuid`/`uuids`（リクエストボディ） | Storage層に渡らないため本issueのスコープ外とする（JWT発行ロジックの型強化は将来issueで検討） |
+
+### 変更内容
+
+**`storage/FileId.kt`（新規）**
+
+```kotlin
+@JvmInline
+value class FileId(val value: UUID) {
+    override fun toString(): String = value.toString()
+
+    companion object {
+        fun parseOrNull(raw: String): FileId? = try {
+            FileId(UUID.fromString(raw))
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+}
+```
+
+**`storage/FileStorage.kt`**
+
+- `exists`, `savePending`, `confirm`, `getBytes`, `getMeta`, `delete`, `updateVisibility` の引数を `uuid: String` → `id: FileId` に変更
+
+**`storage/LocalFileStorage.kt` / `storage/R2FileStorage.kt`**
+
+- 上記シグネチャ変更に追随。パス/キー構築は `id.toString()`（=UUID文字列）を使うため既存ファイルとの互換性を保つ
+
+**`routes/FileRoutes.kt` / `routes/InternalRoutes.kt`**
+
+- `call.parameters["uuid"]` 取得後、`FileId.parseOrNull(...)` で検証し、`null`なら`400 Bad Request`
+- `FileStorage`呼び出しは`FileId`を渡す。`JwtService`呼び出しは`fileId.toString()`を渡す
+
+### テスト
+
+- `FileRoutesTest.kt` に以下を追加:
+  - 不正なUUID形式で `PUT /files/{malformed}` → `400`
+  - 不正なUUID形式で `GET /files/{malformed}/file.bin` → `400`
+- 既存テストは `UUID.randomUUID().toString()` を使用しており無変更で通ることを確認する
+
+### 作成・変更ファイル一覧（#19）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `src/main/kotlin/net/kigawa/kaft/storage/FileId.kt` | 新規作成 | `FileId` value class |
+| `src/main/kotlin/net/kigawa/kaft/storage/FileStorage.kt` | 更新 | 引数を`FileId`に変更 |
+| `src/main/kotlin/net/kigawa/kaft/storage/LocalFileStorage.kt` | 更新 | `FileId`対応 |
+| `src/main/kotlin/net/kigawa/kaft/storage/R2FileStorage.kt` | 更新 | `FileId`対応 |
+| `src/main/kotlin/net/kigawa/kaft/routes/FileRoutes.kt` | 更新 | UUID検証・400応答を追加 |
+| `src/main/kotlin/net/kigawa/kaft/routes/InternalRoutes.kt` | 更新 | UUID検証・400応答を追加 |
+| `src/test/kotlin/net/kigawa/kaft/FileRoutesTest.kt` | 更新 | malformed UUIDのテストを追加 |
+
+---
+
 ## Internal JWTのissuer・audience検証（refs #23）
 
 ### 概要
