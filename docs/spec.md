@@ -1,5 +1,83 @@
 # kaft 設計・仕様規約
 
+## Storage I/Oを非同期化しKtorのblockingを回避する（refs #22）
+
+### 概要
+
+`FileStorage`のI/O操作は`createPending`以外すべて同期関数であり、Local backendは`java.nio.file.Files`、
+R2 backendは同期版`S3Client`をKtorのrequest coroutine上で直接blockingに実行している。`FileStorage`の
+全メソッドを`suspend fun`にし、blockingな実処理は`Dispatchers.IO`へ分離する。
+
+### 設計方針（S3AsyncClientへの移行は見送る判断について）
+
+| 項目 | 方針 |
+|---|---|
+| `FileStorage`インターフェース | 全メソッドを`suspend fun`にする |
+| Local backend | 各メソッドの実装本体を`withContext(Dispatchers.IO) { ... }`でラップする |
+| R2 backend | **`S3AsyncClient`への移行は行わない。** 既存の同期`S3Client`呼び出しを`withContext(Dispatchers.IO) { ... }`でラップする方式を採用する |
+| ルート層（`FileRoutes.kt`/`InternalRoutes.kt`） | Ktorのルートハンドラは元々suspendラムダのため、`FileStorage`呼び出し箇所のコード変更は不要（シグネチャがsuspendになるだけで呼び出し構文は同一） |
+
+**S3AsyncClient見送りの理由**: issue本文でも「R2 backendは**可能であれば**S3AsyncClientなど非同期クライアントへ移行する」と条件付きの記載になっている。`S3AsyncClient`は`AsyncRequestBody`/`AsyncResponseTransformer`がReactive Streams（`Publisher<ByteBuffer>`）ベースであり、現在Ktorの`ByteReadChannel`（コルーチンベース）で統一している#21のストリーミング実装と直接互換性がない。ブリッジには自前のPublisher実装が必要になり複雑性・リスクが大きく、既存のテスト基盤（mockなし）でも検証が困難。一方、`withContext(Dispatchers.IO)`によるラップは完了条件（「request coroutine上で重いblocking I/Oを直接実行しない」「FileStorageのI/O APIがcoroutine friendlyになる」「Local/R2双方で既存の機能を維持する」）を全て満たす標準的なKotlin coroutinesのイディオムであり、挙動を一切変えずに安全に達成できる。将来的に本格的な非同期化が必要になった場合は別issueで検討する。
+
+### 変更内容
+
+**`storage/FileStorage.kt`**
+
+```kotlin
+interface FileStorage {
+    suspend fun exists(id: FileId): Boolean
+    suspend fun createPending(id: FileId, data: ByteReadChannel, size: Long, contentType: String): CreateResult
+    suspend fun confirm(id: FileId)
+    suspend fun getMeta(id: FileId): FileMeta?
+    suspend fun delete(id: FileId)
+    suspend fun updateVisibility(id: FileId, visibility: Visibility)
+    suspend fun openReadChannel(id: FileId, range: LongRange? = null): ByteReadChannel?
+}
+```
+
+**`storage/LocalFileStorage.kt`**
+
+- 各`override fun`を`override suspend fun`にし、本体全体を`withContext(Dispatchers.IO) { ... }`でラップする
+- `confirm`/`updateVisibility`内の`synchronized(lockFor(id)) { ... }`ブロック内では**suspend関数を呼び出さない**（synchronizedブロック内でのsuspend呼び出しはロック保持中に本当に懸架される危険があり避けるべきというkotlinx.coroutinesの既知の注意点のため）。そのため、`getMeta`のロジックをprivateな非suspendヘルパー`readMetaBlocking(id): FileMeta?`に切り出し、`synchronized`ブロック内ではそちらを呼ぶ。公開の`getMeta`はこのヘルパーを`withContext(Dispatchers.IO)`でラップして呼ぶだけにする
+
+```kotlin
+private fun readMetaBlocking(id: FileId): FileMeta? {
+    val path = metaPath(id)
+    if (!Files.exists(path)) return null
+    return Json.decodeFromString(Files.readString(path))
+}
+
+override suspend fun getMeta(id: FileId): FileMeta? = withContext(Dispatchers.IO) { readMetaBlocking(id) }
+
+override suspend fun confirm(id: FileId): Unit = withContext(Dispatchers.IO) {
+    synchronized(lockFor(id)) {
+        val meta = readMetaBlocking(id) ?: error("File not found: $id")
+        writeMeta(id, meta.copy(state = FileState.CONFIRMED))
+    }
+}
+```
+
+**`storage/R2FileStorage.kt`**
+
+- 各`override fun`を`override suspend fun`にし、本体を`withContext(Dispatchers.IO) { ... }`でラップする
+- `getMetaWithETag`・`updateMetaWithRetry`・`headExists`は非suspendのprivateヘルパーのまま維持し（既にwithContext内から呼ばれるため変更不要）、ロジックは一切変更しない
+
+### 並行性の検証
+
+- `LocalFileStorageTest.kt`に、複数コルーチンから`getMeta`/`exists`を同時に呼び出し、すべて正しい結果を返すことを確認するテストを追加する（`coroutineScope { List(N) { launch { ... } } }`）
+- R2 backendは既存のS3Client mockインフラがないため自動テストは見送る（既存issue群と同様の方針）。private helperのロジックは無変更のため、`withContext`によるラップのみのレビューで十分と判断する
+
+### 作成・変更ファイル一覧（#22）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `src/main/kotlin/net/kigawa/kaft/storage/FileStorage.kt` | 更新 | 全メソッドを`suspend fun`にする |
+| `src/main/kotlin/net/kigawa/kaft/storage/LocalFileStorage.kt` | 更新 | `withContext(Dispatchers.IO)`でラップ、`readMetaBlocking`ヘルパーを追加 |
+| `src/main/kotlin/net/kigawa/kaft/storage/R2FileStorage.kt` | 更新 | `withContext(Dispatchers.IO)`でラップ |
+| `src/test/kotlin/net/kigawa/kaft/storage/LocalFileStorageTest.kt` | 更新 | 既存テストをsuspend呼び出しに追随、並行呼び出しテストを追加 |
+
+---
+
 ## ファイル取得でHTTP Range Requestに対応する（refs #26）
 
 ### 概要
