@@ -6,6 +6,7 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import net.kigawa.kaft.auth.JwtService
+import net.kigawa.kaft.storage.CreateResult
 import net.kigawa.kaft.storage.FileId
 import net.kigawa.kaft.storage.FileState
 import net.kigawa.kaft.storage.FileStorage
@@ -23,13 +24,11 @@ fun Application.configureFileRoutes(jwtService: JwtService, fileStorage: FileSto
                 return@put call.respond(HttpStatusCode.Unauthorized)
             }
 
-            if (fileStorage.exists(fileId)) {
-                return@put call.respond(HttpStatusCode.Conflict)
-            }
-
             val data = call.receive<ByteArray>()
-            fileStorage.savePending(fileId, data)
-            call.respond(HttpStatusCode.Created)
+            when (fileStorage.createPending(fileId, data)) {
+                CreateResult.Created -> call.respond(HttpStatusCode.Created)
+                CreateResult.AlreadyExists -> call.respond(HttpStatusCode.Conflict)
+            }
         }
 
         get("/files/{uuid}/{filename}") {
