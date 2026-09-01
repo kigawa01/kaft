@@ -12,6 +12,8 @@ import net.kigawa.kaft.storage.FileState
 import net.kigawa.kaft.storage.FileStorage
 import net.kigawa.kaft.storage.Visibility
 
+private const val DEFAULT_CONTENT_TYPE = "application/octet-stream"
+
 fun Application.configureFileRoutes(jwtService: JwtService, fileStorage: FileStorage) {
     routing {
         put("/files/{uuid}") {
@@ -25,7 +27,8 @@ fun Application.configureFileRoutes(jwtService: JwtService, fileStorage: FileSto
             }
 
             val data = call.receive<ByteArray>()
-            when (fileStorage.createPending(fileId, data)) {
+            val contentType = call.request.headers[HttpHeaders.ContentType] ?: DEFAULT_CONTENT_TYPE
+            when (fileStorage.createPending(fileId, data, contentType)) {
                 CreateResult.Created -> call.respond(HttpStatusCode.Created)
                 CreateResult.AlreadyExists -> call.respond(HttpStatusCode.Conflict)
             }
@@ -61,7 +64,7 @@ fun Application.configureFileRoutes(jwtService: JwtService, fileStorage: FileSto
                 call.response.header(HttpHeaders.CacheControl, "public, max-age=31536000, immutable")
             }
 
-            call.respondBytes(data, ContentType.Application.OctetStream)
+            call.respondBytes(data, ContentType.parse(meta.contentType))
         }
     }
 }

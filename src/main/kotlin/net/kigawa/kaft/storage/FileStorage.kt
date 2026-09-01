@@ -9,6 +9,8 @@ enum class Visibility { PUBLIC, PRIVATE }
 data class FileMeta(
     val state: FileState,
     val visibility: Visibility,
+    val contentType: String,
+    val size: Long,
 )
 
 sealed interface CreateResult {
@@ -18,7 +20,7 @@ sealed interface CreateResult {
 
 interface FileStorage {
     fun exists(id: FileId): Boolean
-    fun createPending(id: FileId, data: ByteArray): CreateResult
+    fun createPending(id: FileId, data: ByteArray, contentType: String): CreateResult
     fun confirm(id: FileId)
     fun getBytes(id: FileId): ByteArray?
     fun getMeta(id: FileId): FileMeta?
