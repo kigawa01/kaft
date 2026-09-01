@@ -2,6 +2,7 @@ package net.kigawa.kaft.storage
 
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -17,11 +18,15 @@ class LocalFileStorage(private val baseDir: Path) : FileStorage {
 
     override fun exists(id: FileId): Boolean = Files.exists(fileDir(id))
 
-    override fun savePending(id: FileId, data: ByteArray) {
-        val dir = fileDir(id)
-        Files.createDirectories(dir)
+    override fun createPending(id: FileId, data: ByteArray): CreateResult {
+        try {
+            Files.createDirectory(fileDir(id))
+        } catch (_: FileAlreadyExistsException) {
+            return CreateResult.AlreadyExists
+        }
         Files.write(dataPath(id), data)
         writeMeta(id, FileMeta(state = FileState.PENDING, visibility = Visibility.PRIVATE))
+        return CreateResult.Created
     }
 
     override fun confirm(id: FileId) {

@@ -35,12 +35,22 @@ class R2FileStorage(config: R2StorageConfig) : FileStorage {
 
     override fun exists(id: FileId): Boolean = headExists(metaKey(id))
 
-    override fun savePending(id: FileId, data: ByteArray) {
+    override fun createPending(id: FileId, data: ByteArray): CreateResult {
+        try {
+            client.putObject(
+                PutObjectRequest.builder().bucket(bucket).key(metaKey(id)).ifNoneMatch("*").build(),
+                RequestBody.fromString(
+                    Json.encodeToString(FileMeta(state = FileState.PENDING, visibility = Visibility.PRIVATE)),
+                ),
+            )
+        } catch (e: S3Exception) {
+            if (e.statusCode() == 412) return CreateResult.AlreadyExists else throw e
+        }
         client.putObject(
             PutObjectRequest.builder().bucket(bucket).key(dataKey(id)).build(),
             RequestBody.fromBytes(data),
         )
-        writeMeta(id, FileMeta(state = FileState.PENDING, visibility = Visibility.PRIVATE))
+        return CreateResult.Created
     }
 
     override fun confirm(id: FileId) {
