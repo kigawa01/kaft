@@ -19,7 +19,7 @@ spec:
         - name: harbor-registry
       containers:
         - name: kaft
-          image: harbor.kigawa.net/private/kaft:stg-078fd941545654ecaecb8a8ba4c1fdb4525015f4
+          image: harbor.kigawa.net/private/kaft:stg-dcdf4f80557e203722635687e21976406d1eb8ed
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
