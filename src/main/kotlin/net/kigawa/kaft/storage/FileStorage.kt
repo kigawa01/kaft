@@ -12,11 +12,11 @@ data class FileMeta(
 )
 
 interface FileStorage {
-    fun exists(uuid: String): Boolean
-    fun savePending(uuid: String, data: ByteArray)
-    fun confirm(uuid: String)
-    fun getBytes(uuid: String): ByteArray?
-    fun getMeta(uuid: String): FileMeta?
-    fun delete(uuid: String)
-    fun updateVisibility(uuid: String, visibility: Visibility)
+    fun exists(id: FileId): Boolean
+    fun savePending(id: FileId, data: ByteArray)
+    fun confirm(id: FileId)
+    fun getBytes(id: FileId): ByteArray?
+    fun getMeta(id: FileId): FileMeta?
+    fun delete(id: FileId)
+    fun updateVisibility(id: FileId, visibility: Visibility)
 }

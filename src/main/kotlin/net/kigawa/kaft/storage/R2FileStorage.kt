@@ -30,50 +30,50 @@ class R2FileStorage(config: R2StorageConfig) : FileStorage {
         )
         .build()
 
-    private fun dataKey(uuid: String) = "$uuid/data"
-    private fun metaKey(uuid: String) = "$uuid/meta.json"
+    private fun dataKey(id: FileId) = "$id/data"
+    private fun metaKey(id: FileId) = "$id/meta.json"
 
-    override fun exists(uuid: String): Boolean = headExists(metaKey(uuid))
+    override fun exists(id: FileId): Boolean = headExists(metaKey(id))
 
-    override fun savePending(uuid: String, data: ByteArray) {
+    override fun savePending(id: FileId, data: ByteArray) {
         client.putObject(
-            PutObjectRequest.builder().bucket(bucket).key(dataKey(uuid)).build(),
+            PutObjectRequest.builder().bucket(bucket).key(dataKey(id)).build(),
             RequestBody.fromBytes(data),
         )
-        writeMeta(uuid, FileMeta(state = FileState.PENDING, visibility = Visibility.PRIVATE))
+        writeMeta(id, FileMeta(state = FileState.PENDING, visibility = Visibility.PRIVATE))
     }
 
-    override fun confirm(uuid: String) {
-        val meta = getMeta(uuid) ?: error("File not found: $uuid")
-        writeMeta(uuid, meta.copy(state = FileState.CONFIRMED))
+    override fun confirm(id: FileId) {
+        val meta = getMeta(id) ?: error("File not found: $id")
+        writeMeta(id, meta.copy(state = FileState.CONFIRMED))
     }
 
-    override fun getBytes(uuid: String): ByteArray? {
-        if (!headExists(dataKey(uuid))) return null
-        return client.getObject(GetObjectRequest.builder().bucket(bucket).key(dataKey(uuid)).build())
+    override fun getBytes(id: FileId): ByteArray? {
+        if (!headExists(dataKey(id))) return null
+        return client.getObject(GetObjectRequest.builder().bucket(bucket).key(dataKey(id)).build())
             .use { it.readAllBytes() }
     }
 
-    override fun getMeta(uuid: String): FileMeta? {
-        if (!headExists(metaKey(uuid))) return null
-        val json = client.getObject(GetObjectRequest.builder().bucket(bucket).key(metaKey(uuid)).build())
+    override fun getMeta(id: FileId): FileMeta? {
+        if (!headExists(metaKey(id))) return null
+        val json = client.getObject(GetObjectRequest.builder().bucket(bucket).key(metaKey(id)).build())
             .use { it.readAllBytes() }
         return Json.decodeFromString(String(json))
     }
 
-    override fun delete(uuid: String) {
-        client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(dataKey(uuid)).build())
-        client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(metaKey(uuid)).build())
+    override fun delete(id: FileId) {
+        client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(dataKey(id)).build())
+        client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(metaKey(id)).build())
     }
 
-    override fun updateVisibility(uuid: String, visibility: Visibility) {
-        val meta = getMeta(uuid) ?: error("File not found: $uuid")
-        writeMeta(uuid, meta.copy(visibility = visibility))
+    override fun updateVisibility(id: FileId, visibility: Visibility) {
+        val meta = getMeta(id) ?: error("File not found: $id")
+        writeMeta(id, meta.copy(visibility = visibility))
     }
 
-    private fun writeMeta(uuid: String, meta: FileMeta) {
+    private fun writeMeta(id: FileId, meta: FileMeta) {
         client.putObject(
-            PutObjectRequest.builder().bucket(bucket).key(metaKey(uuid)).build(),
+            PutObjectRequest.builder().bucket(bucket).key(metaKey(id)).build(),
             RequestBody.fromString(Json.encodeToString(meta)),
         )
     }

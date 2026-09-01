@@ -8,6 +8,7 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
 import net.kigawa.kaft.auth.JwtService
+import net.kigawa.kaft.storage.FileId
 import net.kigawa.kaft.storage.FileStorage
 import net.kigawa.kaft.storage.Visibility
 
@@ -45,29 +46,32 @@ fun Application.configureInternalRoutes(jwtService: JwtService, fileStorage: Fil
                 }
 
                 post("/files/{uuid}/confirm") {
-                    val uuid = call.parameters["uuid"] ?: return@post call.respond(HttpStatusCode.BadRequest)
-                    if (!fileStorage.exists(uuid)) return@post call.respond(HttpStatusCode.NotFound)
-                    fileStorage.confirm(uuid)
+                    val fileId = call.parameters["uuid"]?.let { FileId.parseOrNull(it) }
+                        ?: return@post call.respond(HttpStatusCode.BadRequest)
+                    if (!fileStorage.exists(fileId)) return@post call.respond(HttpStatusCode.NotFound)
+                    fileStorage.confirm(fileId)
                     call.respond(HttpStatusCode.OK)
                 }
 
                 delete("/files/{uuid}") {
-                    val uuid = call.parameters["uuid"] ?: return@delete call.respond(HttpStatusCode.BadRequest)
-                    if (!fileStorage.exists(uuid)) return@delete call.respond(HttpStatusCode.NotFound)
-                    fileStorage.delete(uuid)
+                    val fileId = call.parameters["uuid"]?.let { FileId.parseOrNull(it) }
+                        ?: return@delete call.respond(HttpStatusCode.BadRequest)
+                    if (!fileStorage.exists(fileId)) return@delete call.respond(HttpStatusCode.NotFound)
+                    fileStorage.delete(fileId)
                     call.respond(HttpStatusCode.NoContent)
                 }
 
                 patch("/files/{uuid}/visibility") {
-                    val uuid = call.parameters["uuid"] ?: return@patch call.respond(HttpStatusCode.BadRequest)
-                    if (!fileStorage.exists(uuid)) return@patch call.respond(HttpStatusCode.NotFound)
+                    val fileId = call.parameters["uuid"]?.let { FileId.parseOrNull(it) }
+                        ?: return@patch call.respond(HttpStatusCode.BadRequest)
+                    if (!fileStorage.exists(fileId)) return@patch call.respond(HttpStatusCode.NotFound)
                     val req = call.receive<VisibilityRequest>()
                     val visibility = when (req.visibility) {
                         "public" -> Visibility.PUBLIC
                         "private" -> Visibility.PRIVATE
                         else -> return@patch call.respond(HttpStatusCode.BadRequest)
                     }
-                    fileStorage.updateVisibility(uuid, visibility)
+                    fileStorage.updateVisibility(fileId, visibility)
                     call.respond(HttpStatusCode.OK)
                 }
             }

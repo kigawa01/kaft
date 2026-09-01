@@ -11,48 +11,48 @@ class LocalFileStorage(private val baseDir: Path) : FileStorage {
         Files.createDirectories(baseDir)
     }
 
-    private fun fileDir(uuid: String): Path = baseDir.resolve(uuid)
-    private fun dataPath(uuid: String): Path = fileDir(uuid).resolve("data")
-    private fun metaPath(uuid: String): Path = fileDir(uuid).resolve("meta.json")
+    private fun fileDir(id: FileId): Path = baseDir.resolve(id.toString())
+    private fun dataPath(id: FileId): Path = fileDir(id).resolve("data")
+    private fun metaPath(id: FileId): Path = fileDir(id).resolve("meta.json")
 
-    override fun exists(uuid: String): Boolean = Files.exists(fileDir(uuid))
+    override fun exists(id: FileId): Boolean = Files.exists(fileDir(id))
 
-    override fun savePending(uuid: String, data: ByteArray) {
-        val dir = fileDir(uuid)
+    override fun savePending(id: FileId, data: ByteArray) {
+        val dir = fileDir(id)
         Files.createDirectories(dir)
-        Files.write(dataPath(uuid), data)
-        writeMeta(uuid, FileMeta(state = FileState.PENDING, visibility = Visibility.PRIVATE))
+        Files.write(dataPath(id), data)
+        writeMeta(id, FileMeta(state = FileState.PENDING, visibility = Visibility.PRIVATE))
     }
 
-    override fun confirm(uuid: String) {
-        val meta = getMeta(uuid) ?: error("File not found: $uuid")
-        writeMeta(uuid, meta.copy(state = FileState.CONFIRMED))
+    override fun confirm(id: FileId) {
+        val meta = getMeta(id) ?: error("File not found: $id")
+        writeMeta(id, meta.copy(state = FileState.CONFIRMED))
     }
 
-    override fun getBytes(uuid: String): ByteArray? =
-        if (Files.exists(dataPath(uuid))) Files.readAllBytes(dataPath(uuid)) else null
+    override fun getBytes(id: FileId): ByteArray? =
+        if (Files.exists(dataPath(id))) Files.readAllBytes(dataPath(id)) else null
 
-    override fun getMeta(uuid: String): FileMeta? {
-        val path = metaPath(uuid)
+    override fun getMeta(id: FileId): FileMeta? {
+        val path = metaPath(id)
         if (!Files.exists(path)) return null
         return Json.decodeFromString(Files.readString(path))
     }
 
-    override fun delete(uuid: String) {
-        val dir = fileDir(uuid)
+    override fun delete(id: FileId) {
+        val dir = fileDir(id)
         if (Files.exists(dir)) {
-            Files.deleteIfExists(dataPath(uuid))
-            Files.deleteIfExists(metaPath(uuid))
+            Files.deleteIfExists(dataPath(id))
+            Files.deleteIfExists(metaPath(id))
             Files.deleteIfExists(dir)
         }
     }
 
-    override fun updateVisibility(uuid: String, visibility: Visibility) {
-        val meta = getMeta(uuid) ?: error("File not found: $uuid")
-        writeMeta(uuid, meta.copy(visibility = visibility))
+    override fun updateVisibility(id: FileId, visibility: Visibility) {
+        val meta = getMeta(id) ?: error("File not found: $id")
+        writeMeta(id, meta.copy(visibility = visibility))
     }
 
-    private fun writeMeta(uuid: String, meta: FileMeta) {
-        Files.writeString(metaPath(uuid), Json.encodeToString(meta))
+    private fun writeMeta(id: FileId, meta: FileMeta) {
+        Files.writeString(metaPath(id), Json.encodeToString(meta))
     }
 }

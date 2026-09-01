@@ -135,6 +135,23 @@ class FileRoutesTest {
     }
 
     @Test
+    fun `upload with malformed uuid returns 400`() = testApp {
+        val uploadToken = issueUploadToken("not-a-uuid")
+
+        val response = client.put("/files/not-a-uuid") {
+            header(HttpHeaders.Authorization, "Bearer $uploadToken")
+            setBody("data".toByteArray())
+        }
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+    }
+
+    @Test
+    fun `download with malformed uuid returns 400`() = testApp {
+        val response = client.get("/files/not-a-uuid/file.bin")
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+    }
+
+    @Test
     fun `internal endpoints reject missing token`() = testApp {
         val response = client.post("/internal/token") {
             contentType(ContentType.Application.Json)
