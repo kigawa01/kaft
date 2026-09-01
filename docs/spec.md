@@ -1,5 +1,67 @@
 # kaft 設計・仕様規約
 
+## デフォルトJWT secretによる起動禁止（refs #27）
+
+### 概要
+
+`application.conf` の `kaft.jwt.secret` / `kaft.internal.jwtSecret` にはデフォルト値として
+`change-this-secret-in-production` / `change-this-internal-secret-in-production` が設定されている。
+環境変数 `KAFT_JWT_SECRET` / `KAFT_INTERNAL_JWT_SECRET` の設定漏れがあってもアプリケーションが
+起動できてしまうため、既知のデフォルト値のままでは起動を拒否できるようにする。
+
+### 設計方針
+
+| 項目 | 方針 |
+|---|---|
+| チェック対象 | `kaft.jwt.secret`、`kaft.internal.jwtSecret` |
+| チェック内容 | 空文字列、または既知のデフォルト値と一致する場合は起動失敗させる |
+| チェック範囲 | 環境フラグ（production/dev等）を新設せず、常に一律で検証する |
+| チェックタイミング | `KaftConfig.fromApplication()` 内、Application module起動時（最も早い段階） |
+| dev/testでの扱い | `TestHelpers.createTestConfig()` は既に固有の値（`test-jwt-secret` 等）を設定しており影響なし。ローカル`./gradlew run`時も環境変数で明示的な値の設定が必須になる |
+| R2 credential等の必須設定チェック | 本issueのスコープ外とする（完了条件に含まれないため見送り、必要なら別issueで対応） |
+
+環境フラグを新設しない理由: 現状コードベースに production/dev を判定する仕組みが存在せず、
+k8s上のdev/stg/main環境はいずれも `Secret` リソース経由で明示的な値を注入する運用のため、
+「デフォルト値を許可しない」を全環境で一律に適用しても実運用への影響がない。
+
+### 変更内容
+
+`KaftConfig.fromApplication()` に以下の検証を追加する。
+
+```kotlin
+private const val DEFAULT_JWT_SECRET = "change-this-secret-in-production"
+private const val DEFAULT_INTERNAL_JWT_SECRET = "change-this-internal-secret-in-production"
+
+private fun requireSecureSecret(value: String, envVarName: String): String {
+    check(value.isNotBlank() && value != DEFAULT_JWT_SECRET && value != DEFAULT_INTERNAL_JWT_SECRET) {
+        "環境変数 $envVarName が未設定、またはデフォルト値のままです。安全な値を設定してください。"
+    }
+    return value
+}
+```
+
+- `jwt.secret` 読み込み時に `requireSecureSecret(..., "KAFT_JWT_SECRET")` を通す
+- `internal.jwtSecret` 読み込み時に `requireSecureSecret(..., "KAFT_INTERNAL_JWT_SECRET")` を通す
+- 検証失敗時は `IllegalStateException` を送出し、アプリケーション起動が失敗する（Ktorはmodule内の例外でstartupを中断する）
+
+### テスト
+
+`KaftConfigTest.kt` を新規作成し、以下を検証する。
+
+- `kaft.jwt.secret` が空文字列 → 起動時（`KaftConfig.fromApplication`呼び出し時）に例外
+- `kaft.jwt.secret` がデフォルト値のまま → 例外
+- `kaft.internal.jwtSecret` がデフォルト値のまま → 例外
+- 有効な値が設定されている場合は正常に `KaftConfig` を構築できる
+
+### 作成・変更ファイル一覧（#27）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `src/main/kotlin/net/kigawa/kaft/config/KaftConfig.kt` | 更新 | デフォルト値・空文字列の場合に起動失敗させる検証を追加 |
+| `src/test/kotlin/net/kigawa/kaft/config/KaftConfigTest.kt` | 新規作成 | 設定検証のテスト |
+
+---
+
 ## 実装完了PRのCloses規約強化（refs #8）
 
 ### 概要
