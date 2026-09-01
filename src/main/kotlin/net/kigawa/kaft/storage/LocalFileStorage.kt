@@ -5,9 +5,11 @@ import io.ktor.utils.io.jvm.javaio.copyTo
 import io.ktor.utils.io.jvm.javaio.toByteReadChannel
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.nio.channels.Channels
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.util.concurrent.ConcurrentHashMap
 
 class LocalFileStorage(private val baseDir: Path) : FileStorage {
@@ -49,8 +51,12 @@ class LocalFileStorage(private val baseDir: Path) : FileStorage {
         writeMeta(id, meta.copy(state = FileState.CONFIRMED))
     }
 
-    override fun openReadChannel(id: FileId): ByteReadChannel? =
-        if (Files.exists(dataPath(id))) Files.newInputStream(dataPath(id)).toByteReadChannel() else null
+    override fun openReadChannel(id: FileId, range: LongRange?): ByteReadChannel? {
+        if (!Files.exists(dataPath(id))) return null
+        val channel = Files.newByteChannel(dataPath(id), StandardOpenOption.READ)
+        if (range != null) channel.position(range.first)
+        return Channels.newInputStream(channel).toByteReadChannel()
+    }
 
     override fun getMeta(id: FileId): FileMeta? {
         val path = metaPath(id)

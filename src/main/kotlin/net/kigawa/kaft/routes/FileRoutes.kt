@@ -15,6 +15,37 @@ import net.kigawa.kaft.storage.Visibility
 
 private const val DEFAULT_CONTENT_TYPE = "application/octet-stream"
 
+private sealed interface RangeResult {
+    data object Absent : RangeResult
+    data object NotSatisfiable : RangeResult
+    data class Satisfiable(val range: LongRange) : RangeResult
+}
+
+private fun parseRange(header: String?, size: Long): RangeResult {
+    if (header == null || !header.startsWith("bytes=")) return RangeResult.Absent
+    val spec = header.removePrefix("bytes=")
+    if (spec.contains(',')) return RangeResult.Absent
+    val dashIndex = spec.indexOf('-')
+    if (dashIndex < 0) return RangeResult.Absent
+    val startStr = spec.substring(0, dashIndex)
+    val endStr = spec.substring(dashIndex + 1)
+
+    if (startStr.isEmpty()) {
+        val suffixLength = endStr.toLongOrNull() ?: return RangeResult.Absent
+        if (suffixLength <= 0) return RangeResult.Absent
+        if (size <= 0) return RangeResult.NotSatisfiable
+        val start = maxOf(0, size - suffixLength)
+        return RangeResult.Satisfiable(start until size)
+    }
+
+    val start = startStr.toLongOrNull() ?: return RangeResult.Absent
+    if (start < 0) return RangeResult.Absent
+    val end = if (endStr.isEmpty()) size - 1 else (endStr.toLongOrNull() ?: return RangeResult.Absent)
+    if (start > end) return RangeResult.Absent
+    if (start >= size) return RangeResult.NotSatisfiable
+    return RangeResult.Satisfiable(start..minOf(end, size - 1))
+}
+
 fun Application.configureFileRoutes(jwtService: JwtService, fileStorage: FileStorage) {
     routing {
         put("/files/{uuid}") {
@@ -55,19 +86,41 @@ fun Application.configureFileRoutes(jwtService: JwtService, fileStorage: FileSto
                 }
             }
 
-            val channel = fileStorage.openReadChannel(fileId) ?: return@get call.respond(HttpStatusCode.NotFound)
-
             call.response.header(
                 HttpHeaders.ContentDisposition,
                 ContentDisposition.Attachment.withParameter(ContentDisposition.Parameters.FileName, filename).toString()
             )
+            call.response.header(HttpHeaders.AcceptRanges, "bytes")
 
             if (meta.visibility == Visibility.PUBLIC) {
                 call.response.header(HttpHeaders.CacheControl, "public, max-age=31536000, immutable")
             }
 
-            call.respondBytesWriter(contentType = ContentType.parse(meta.contentType), contentLength = meta.size) {
-                channel.copyTo(this)
+            when (val rangeResult = parseRange(call.request.headers[HttpHeaders.Range], meta.size)) {
+                RangeResult.NotSatisfiable -> {
+                    call.response.header(HttpHeaders.ContentRange, "bytes */${meta.size}")
+                    call.respond(HttpStatusCode.RequestedRangeNotSatisfiable)
+                }
+                is RangeResult.Satisfiable -> {
+                    val range = rangeResult.range
+                    val length = range.last - range.first + 1
+                    val channel = fileStorage.openReadChannel(fileId, range)
+                        ?: return@get call.respond(HttpStatusCode.NotFound)
+                    call.response.header(HttpHeaders.ContentRange, "bytes ${range.first}-${range.last}/${meta.size}")
+                    call.respondBytesWriter(
+                        contentType = ContentType.parse(meta.contentType),
+                        status = HttpStatusCode.PartialContent,
+                        contentLength = length,
+                    ) {
+                        channel.copyTo(this, limit = length)
+                    }
+                }
+                RangeResult.Absent -> {
+                    val channel = fileStorage.openReadChannel(fileId) ?: return@get call.respond(HttpStatusCode.NotFound)
+                    call.respondBytesWriter(contentType = ContentType.parse(meta.contentType), contentLength = meta.size) {
+                        channel.copyTo(this, limit = meta.size)
+                    }
+                }
             }
         }
     }

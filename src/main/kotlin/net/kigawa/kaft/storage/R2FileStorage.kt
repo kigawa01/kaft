@@ -65,9 +65,12 @@ class R2FileStorage(config: R2StorageConfig) : FileStorage {
 
     override fun confirm(id: FileId) = updateMetaWithRetry(id) { it.copy(state = FileState.CONFIRMED) }
 
-    override fun openReadChannel(id: FileId): ByteReadChannel? {
+    override fun openReadChannel(id: FileId, range: LongRange?): ByteReadChannel? {
         if (!headExists(dataKey(id))) return null
-        return client.getObject(GetObjectRequest.builder().bucket(bucket).key(dataKey(id)).build()).toByteReadChannel()
+        val request = GetObjectRequest.builder().bucket(bucket).key(dataKey(id)).apply {
+            if (range != null) range("bytes=${range.first}-${range.last}")
+        }.build()
+        return client.getObject(request).toByteReadChannel()
     }
 
     override fun getMeta(id: FileId): FileMeta? = getMetaWithETag(id)?.first

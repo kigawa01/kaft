@@ -26,5 +26,5 @@ interface FileStorage {
     fun getMeta(id: FileId): FileMeta?
     fun delete(id: FileId)
     fun updateVisibility(id: FileId, visibility: Visibility)
-    fun openReadChannel(id: FileId): ByteReadChannel?
+    fun openReadChannel(id: FileId, range: LongRange? = null): ByteReadChannel?
 }

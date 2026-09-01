@@ -32,6 +32,23 @@ class FileRoutesTest {
         block()
     }
 
+    private suspend fun ApplicationTestBuilder.uploadConfirmedPublicFile(uuid: String, data: ByteArray) {
+        val uploadToken = issueUploadToken(uuid)
+        val internalToken = issueInternalToken()
+        client.put("/files/$uuid") {
+            header(HttpHeaders.Authorization, "Bearer $uploadToken")
+            setBody(data)
+        }
+        client.post("/internal/files/$uuid/confirm") {
+            header(HttpHeaders.Authorization, "Bearer $internalToken")
+        }
+        client.patch("/internal/files/$uuid/visibility") {
+            header(HttpHeaders.Authorization, "Bearer $internalToken")
+            contentType(ContentType.Application.Json)
+            setBody("""{"visibility":"public"}""")
+        }
+    }
+
     @Test
     fun `upload and download public file`() = testApp {
         val uuid = UUID.randomUUID().toString()
@@ -140,6 +157,79 @@ class FileRoutesTest {
         val downloadResponse = client.get("/files/$uuid/large.bin")
         assertEquals(HttpStatusCode.OK, downloadResponse.status)
         assertTrue(data.contentEquals(downloadResponse.bodyAsBytes()))
+    }
+
+    @Test
+    fun `download without range header includes Accept-Ranges`() = testApp {
+        val uuid = UUID.randomUUID().toString()
+        uploadConfirmedPublicFile(uuid, "0123456789".toByteArray())
+
+        val response = client.get("/files/$uuid/file.bin")
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals("bytes", response.headers[HttpHeaders.AcceptRanges])
+    }
+
+    @Test
+    fun `range request with start-end returns 206 with correct slice`() = testApp {
+        val uuid = UUID.randomUUID().toString()
+        uploadConfirmedPublicFile(uuid, "0123456789".toByteArray())
+
+        val response = client.get("/files/$uuid/file.bin") {
+            header(HttpHeaders.Range, "bytes=2-4")
+        }
+        assertEquals(HttpStatusCode.PartialContent, response.status)
+        assertEquals("bytes 2-4/10", response.headers[HttpHeaders.ContentRange])
+        assertEquals("234", response.bodyAsText())
+    }
+
+    @Test
+    fun `range request with open-ended start returns rest of file`() = testApp {
+        val uuid = UUID.randomUUID().toString()
+        uploadConfirmedPublicFile(uuid, "0123456789".toByteArray())
+
+        val response = client.get("/files/$uuid/file.bin") {
+            header(HttpHeaders.Range, "bytes=7-")
+        }
+        assertEquals(HttpStatusCode.PartialContent, response.status)
+        assertEquals("bytes 7-9/10", response.headers[HttpHeaders.ContentRange])
+        assertEquals("789", response.bodyAsText())
+    }
+
+    @Test
+    fun `range request with suffix length returns last N bytes`() = testApp {
+        val uuid = UUID.randomUUID().toString()
+        uploadConfirmedPublicFile(uuid, "0123456789".toByteArray())
+
+        val response = client.get("/files/$uuid/file.bin") {
+            header(HttpHeaders.Range, "bytes=-3")
+        }
+        assertEquals(HttpStatusCode.PartialContent, response.status)
+        assertEquals("bytes 7-9/10", response.headers[HttpHeaders.ContentRange])
+        assertEquals("789", response.bodyAsText())
+    }
+
+    @Test
+    fun `range request out of bounds returns 416`() = testApp {
+        val uuid = UUID.randomUUID().toString()
+        uploadConfirmedPublicFile(uuid, "0123456789".toByteArray())
+
+        val response = client.get("/files/$uuid/file.bin") {
+            header(HttpHeaders.Range, "bytes=100-200")
+        }
+        assertEquals(HttpStatusCode.RequestedRangeNotSatisfiable, response.status)
+        assertEquals("bytes */10", response.headers[HttpHeaders.ContentRange])
+    }
+
+    @Test
+    fun `malformed range header is ignored and full content is returned`() = testApp {
+        val uuid = UUID.randomUUID().toString()
+        uploadConfirmedPublicFile(uuid, "0123456789".toByteArray())
+
+        val response = client.get("/files/$uuid/file.bin") {
+            header(HttpHeaders.Range, "bytes=abc")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals("0123456789", response.bodyAsText())
     }
 
     @Test
