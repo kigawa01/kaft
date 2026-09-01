@@ -2,6 +2,8 @@ package net.kigawa.kaft.storage
 
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.toByteArray
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
@@ -21,6 +23,13 @@ class LocalFileStorageTest {
     private fun createPending(storage: LocalFileStorage, id: FileId, data: ByteArray, contentType: String) =
         runBlocking { storage.createPending(id, ByteReadChannel(data), data.size.toLong(), contentType) }
 
+    private fun exists(storage: LocalFileStorage, id: FileId) = runBlocking { storage.exists(id) }
+
+    private fun getMeta(storage: LocalFileStorage, id: FileId) = runBlocking { storage.getMeta(id) }
+
+    private fun readAll(storage: LocalFileStorage, id: FileId) =
+        runBlocking { storage.openReadChannel(id)!!.toByteArray() }
+
     @Test
     fun `createPending on new id succeeds`() {
         val storage = LocalFileStorage(tempDir)
@@ -29,7 +38,7 @@ class LocalFileStorageTest {
         val result = createPending(storage, id, "data".toByteArray(), "text/plain")
 
         assertEquals(CreateResult.Created, result)
-        assertTrue(storage.exists(id))
+        assertTrue(exists(storage, id))
     }
 
     @Test
@@ -41,8 +50,7 @@ class LocalFileStorageTest {
         val result = createPending(storage, id, "second".toByteArray(), "text/plain")
 
         assertEquals(CreateResult.AlreadyExists, result)
-        val bytes = runBlocking { storage.openReadChannel(id)!!.toByteArray() }
-        assertEquals("first", String(bytes))
+        assertEquals("first", String(readAll(storage, id)))
     }
 
     @Test
@@ -53,7 +61,7 @@ class LocalFileStorageTest {
 
         createPending(storage, id, data, "image/png")
 
-        val meta = storage.getMeta(id)!!
+        val meta = getMeta(storage, id)!!
         assertEquals("image/png", meta.contentType)
         assertEquals(data.size.toLong(), meta.size)
     }
@@ -66,8 +74,7 @@ class LocalFileStorageTest {
 
         createPending(storage, id, data, "application/octet-stream")
 
-        val readBack = runBlocking { storage.openReadChannel(id)!!.toByteArray() }
-        assertTrue(data.contentEquals(readBack))
+        assertTrue(data.contentEquals(readAll(storage, id)))
     }
 
     @Test
@@ -106,11 +113,11 @@ class LocalFileStorageTest {
         val executor = Executors.newFixedThreadPool(2)
         val confirmFuture = executor.submit {
             startLatch.await()
-            storage.confirm(id)
+            runBlocking { storage.confirm(id) }
         }
         val visibilityFuture = executor.submit {
             startLatch.await()
-            storage.updateVisibility(id, Visibility.PUBLIC)
+            runBlocking { storage.updateVisibility(id, Visibility.PUBLIC) }
         }
 
         startLatch.countDown()
@@ -118,8 +125,26 @@ class LocalFileStorageTest {
         visibilityFuture.get(5, TimeUnit.SECONDS)
         executor.shutdown()
 
-        val meta = storage.getMeta(id)!!
+        val meta = getMeta(storage, id)!!
         assertEquals(FileState.CONFIRMED, meta.state)
         assertEquals(Visibility.PUBLIC, meta.visibility)
+    }
+
+    @Test
+    fun `concurrent coroutine reads of exists and getMeta return consistent results`() {
+        val storage = LocalFileStorage(tempDir)
+        val id = FileId(UUID.randomUUID())
+        createPending(storage, id, "data".toByteArray(), "text/plain")
+
+        val coroutineCount = 50
+        runBlocking {
+            coroutineScope {
+                val results = List(coroutineCount) {
+                    async { storage.exists(id) to storage.getMeta(id) }
+                }.map { it.await() }
+
+                assertTrue(results.all { (exists, meta) -> exists && meta?.contentType == "text/plain" })
+            }
+        }
     }
 }
