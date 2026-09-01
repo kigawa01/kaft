@@ -89,6 +89,8 @@ fix: ○○のバグを修正 fix #7
 gh pr create --title "<type>: <概要> refs #<issue番号>" --body "..." --base develop
 ```
 
+> **CRITICAL（必須）**: 実装完了PRのbodyには必ず `Closes #<issue番号>` を使うこと。`refs #<issue番号>` のままではissueが自動クローズされない（PR #6の反省）。
+
 PR本文に必ず含めること:
 - 実装完了PRは `Closes #<issue番号>`（issueを自動クローズ）
 - 計画PR・作業途中は `refs #<issue番号>`
