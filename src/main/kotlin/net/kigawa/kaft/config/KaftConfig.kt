@@ -12,6 +12,8 @@ data class JwtConfig(
 
 data class InternalConfig(
     val jwtSecret: String,
+    val issuer: String,
+    val audience: String,
 )
 
 data class R2StorageConfig(
@@ -69,6 +71,8 @@ data class KaftConfig(
                         config.property("kaft.internal.jwtSecret").getString(),
                         "KAFT_INTERNAL_JWT_SECRET",
                     ),
+                    issuer = config.property("kaft.internal.issuer").getString(),
+                    audience = config.property("kaft.internal.audience").getString(),
                 ),
             )
         }
