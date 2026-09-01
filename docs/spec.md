@@ -1,5 +1,115 @@
 # kaft 設計・仕様規約
 
+## ファイル取得でHTTP Range Requestに対応する（refs #26）
+
+### 概要
+
+現在のファイル取得は常にファイル全体を返す。動画・大容量ファイル配信のため、単一range requestに対応し、
+`206 Partial Content`・`Content-Range`・`Accept-Ranges`を扱えるようにする。#21（ストリーミング化）完了後の
+前提を満たしたため着手する。
+
+### 設計方針
+
+| 項目 | 方針 |
+|---|---|
+| 対応範囲 | 単一rangeのみ（`bytes=start-end`、`bytes=start-`、`bytes=-suffix`の3形式）。複数range（`bytes=0-99,200-299`のようなmultipart）は非対応とし、その場合はRangeヘッダーを無視してフル200レスポンスを返す（RFC 7233でサーバーが複数range非対応時にRangeを無視するのは許容される挙動） |
+| 不正な構文 | パース失敗時はRangeヘッダーを無視し、フル200レスポンスを返す |
+| 範囲外指定（unsatisfiable） | `start >= size`（サイズは`FileMeta.size`から取得済み）の場合は`416 Range Not Satisfiable`を返し、`Content-Range: bytes */{size}`を付与する |
+| `Accept-Ranges` | GETレスポンス全体（フル・部分どちらも）に`Accept-Ranges: bytes`を付与する |
+| `FileStorage.openReadChannel` | `range: LongRange? = null`パラメータを追加する。Local backendは指定位置にシークしたチャネルを返す。R2 backendは`GetObjectRequest.range("bytes=start-end")`でR2自体にRange GETを送り、全体取得を避ける |
+| 読み取り量の上限 | ルート層で`copyTo(this, limit = length)`を使い、range指定時・未指定時いずれも転送量を`length`（range指定時は`range.last - range.first + 1`、未指定時は`meta.size`）に揃える。Local backendがシーク後もファイル末尾まで読める実装のままでも、ルート層のlimitで正しい範囲だけがレスポンスされる |
+
+### 変更内容
+
+**`storage/FileStorage.kt`**
+
+```kotlin
+interface FileStorage {
+    ...
+    fun openReadChannel(id: FileId, range: LongRange? = null): ByteReadChannel?
+}
+```
+
+**`storage/LocalFileStorage.kt`**
+
+```kotlin
+override fun openReadChannel(id: FileId, range: LongRange?): ByteReadChannel? {
+    if (!Files.exists(dataPath(id))) return null
+    val channel = Files.newByteChannel(dataPath(id), StandardOpenOption.READ)
+    if (range != null) channel.position(range.first)
+    return Channels.newInputStream(channel).toByteReadChannel()
+}
+```
+
+**`storage/R2FileStorage.kt`**
+
+```kotlin
+override fun openReadChannel(id: FileId, range: LongRange?): ByteReadChannel? {
+    if (!headExists(dataKey(id))) return null
+    val request = GetObjectRequest.builder().bucket(bucket).key(dataKey(id)).apply {
+        if (range != null) range("bytes=${range.first}-${range.last}")
+    }.build()
+    return client.getObject(request).toByteReadChannel()
+}
+```
+
+**`routes/FileRoutes.kt`**
+
+- Rangeヘッダーをパースするプライベート関数を追加（`sealed interface RangeResult { Absent, NotSatisfiable, data class Satisfiable(range: LongRange) }`）
+- GETハンドラ:
+
+```kotlin
+val meta = ...
+...
+call.response.header(HttpHeaders.AcceptRanges, "bytes")
+
+when (val rangeResult = parseRange(call.request.headers[HttpHeaders.Range], meta.size)) {
+    RangeResult.NotSatisfiable -> {
+        call.response.header(HttpHeaders.ContentRange, "bytes */${meta.size}")
+        return@get call.respond(HttpStatusCode.RequestedRangeNotSatisfiable)
+    }
+    is RangeResult.Satisfiable -> {
+        val range = rangeResult.range
+        val length = range.last - range.first + 1
+        val channel = fileStorage.openReadChannel(fileId, range) ?: return@get call.respond(HttpStatusCode.NotFound)
+        call.response.header(HttpHeaders.ContentRange, "bytes ${range.first}-${range.last}/${meta.size}")
+        call.respondBytesWriter(
+            contentType = ContentType.parse(meta.contentType),
+            status = HttpStatusCode.PartialContent,
+            contentLength = length,
+        ) { channel.copyTo(this, limit = length) }
+    }
+    RangeResult.Absent -> {
+        val channel = fileStorage.openReadChannel(fileId) ?: return@get call.respond(HttpStatusCode.NotFound)
+        call.respondBytesWriter(contentType = ContentType.parse(meta.contentType), contentLength = meta.size) {
+            channel.copyTo(this, limit = meta.size)
+        }
+    }
+}
+```
+
+### テスト
+
+- `FileRoutesTest.kt`
+  - `bytes=0-4`のような範囲指定で`206`・正しい`Content-Range`・部分ボディを確認
+  - `bytes=start-`（末尾まで）、`bytes=-N`（末尾N byte）の2形式も確認
+  - `start >= size`となる範囲外指定で`416`・`Content-Range: bytes */{size}`を確認
+  - 不正な構文（例: `bytes=abc`）でRangeが無視されフル`200`が返ることを確認
+  - Rangeヘッダー無しの通常GETに`Accept-Ranges: bytes`が付与されることを確認
+- R2 backendは既存のS3Client mockインフラがないため自動テストは見送る（#24・#21と同様の方針）
+
+### 作成・変更ファイル一覧（#26）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `src/main/kotlin/net/kigawa/kaft/storage/FileStorage.kt` | 更新 | `openReadChannel`に`range`パラメータを追加 |
+| `src/main/kotlin/net/kigawa/kaft/storage/LocalFileStorage.kt` | 更新 | シーク対応 |
+| `src/main/kotlin/net/kigawa/kaft/storage/R2FileStorage.kt` | 更新 | `GetObjectRequest.range()`でR2側にRange GETを送る |
+| `src/main/kotlin/net/kigawa/kaft/routes/FileRoutes.kt` | 更新 | Rangeパース・206/416・Accept-Rangesヘッダー対応 |
+| `src/test/kotlin/net/kigawa/kaft/FileRoutesTest.kt` | 更新 | Range Requestのテストを追加 |
+
+---
+
 ## ファイルのアップロード・ダウンロードをストリーミング化する（refs #21）
 
 ### 概要
