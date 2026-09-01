@@ -21,6 +21,8 @@ class KaftConfigTest {
             "kaft.jwt.issuer" to "kaft-test",
             "kaft.jwt.expirationSeconds" to "3600",
             "kaft.internal.jwtSecret" to internalJwtSecret,
+            "kaft.internal.issuer" to "api-server-test",
+            "kaft.internal.audience" to "kaft-test",
         )
 
     @Test

@@ -14,7 +14,11 @@ class JwtService(
     private val algorithm = Algorithm.HMAC256(jwtConfig.secret)
     private val internalAlgorithm = Algorithm.HMAC256(internalConfig.jwtSecret)
     private val verifier = JWT.require(algorithm).withIssuer(jwtConfig.issuer).build()
-    private val internalVerifier = JWT.require(internalAlgorithm).withClaim("scope", "internal").build()
+    private val internalVerifier = JWT.require(internalAlgorithm)
+        .withIssuer(internalConfig.issuer)
+        .withAudience(internalConfig.audience)
+        .withClaim("scope", "internal")
+        .build()
 
     fun issueUploadToken(uuid: String): String =
         JWT.create()
