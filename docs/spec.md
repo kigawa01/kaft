@@ -1,5 +1,82 @@
 # kaft 設計・仕様規約
 
+## ファイルのContent-Typeとサイズをメタデータとして保持する（refs #25）
+
+### 概要
+
+現在のGETレスポンスは常に`application/octet-stream`を返しており、アップロード時のContent-Typeや
+ファイルサイズを保持していない。`FileMeta`にこれらを追加し、GETで正しいContent-Typeを返せるようにする。
+
+### 設計方針
+
+| 項目 | 方針 |
+|---|---|
+| `FileMeta`への追加 | `contentType: String`、`size: Long` を追加する |
+| Content-Type取得元 | アップロードリクエストの`Content-Type`ヘッダー |
+| fallback仕様 | `Content-Type`ヘッダーが未指定の場合は`application/octet-stream`を使用する（route層の定数として定義） |
+| Content-Typeの検証 | 値の妥当性検証（MIMEタイプとして正しいか等）は行わない。ヘッダー値をそのまま保存し、GET時にそのまま返す（過剰な検証はスコープ外） |
+| size取得元 | アップロードされたバイト列の長さ（`data.size`） |
+| Local/R2 | 両backendとも`createPending()`のシグネチャに`contentType`を追加し、同一の`FileMeta`を保存する。挙動は完全に一致する |
+| GETレスポンス | `meta.contentType`を`ContentType.parse()`して`respondBytes`に渡す（現行のハードコードされた`ContentType.Application.OctetStream`を置き換える） |
+
+### 変更内容
+
+**`storage/FileStorage.kt`**
+
+```kotlin
+@Serializable
+data class FileMeta(
+    val state: FileState,
+    val visibility: Visibility,
+    val contentType: String,
+    val size: Long,
+)
+
+interface FileStorage {
+    fun exists(id: FileId): Boolean
+    fun createPending(id: FileId, data: ByteArray, contentType: String): CreateResult
+    ...
+}
+```
+
+**`storage/LocalFileStorage.kt` / `storage/R2FileStorage.kt`**
+
+- `createPending`に`contentType`引数を追加し、`FileMeta(state = PENDING, visibility = PRIVATE, contentType = contentType, size = data.size.toLong())`を保存する
+
+**`routes/FileRoutes.kt`**
+
+```kotlin
+private const val DEFAULT_CONTENT_TYPE = "application/octet-stream"
+
+// PUT /files/{uuid}
+val contentType = call.request.headers[HttpHeaders.ContentType] ?: DEFAULT_CONTENT_TYPE
+fileStorage.createPending(fileId, data, contentType)
+
+// GET /files/{uuid}/{filename}
+call.respondBytes(data, ContentType.parse(meta.contentType))
+```
+
+### テスト
+
+- `FileRoutesTest.kt`
+  - Content-Typeを指定してアップロード（例: `image/png`）→ GETレスポンスの`Content-Type`ヘッダーが一致することを確認
+  - Content-Type未指定でアップロード → GETレスポンスの`Content-Type`が`application/octet-stream`になることを確認
+- `LocalFileStorageTest.kt`
+  - `createPending`後の`getMeta()`で`contentType`・`size`が正しく保存されていることを確認
+
+### 作成・変更ファイル一覧（#25）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `src/main/kotlin/net/kigawa/kaft/storage/FileStorage.kt` | 更新 | `FileMeta`に`contentType`・`size`を追加、`createPending`に`contentType`引数を追加 |
+| `src/main/kotlin/net/kigawa/kaft/storage/LocalFileStorage.kt` | 更新 | `createPending`のシグネチャ追随 |
+| `src/main/kotlin/net/kigawa/kaft/storage/R2FileStorage.kt` | 更新 | `createPending`のシグネチャ追随 |
+| `src/main/kotlin/net/kigawa/kaft/routes/FileRoutes.kt` | 更新 | Content-Type取得・fallback、GETレスポンスのContent-Type変更 |
+| `src/test/kotlin/net/kigawa/kaft/FileRoutesTest.kt` | 更新 | Content-Type保持・fallbackのテスト追加 |
+| `src/test/kotlin/net/kigawa/kaft/storage/LocalFileStorageTest.kt` | 更新 | メタデータ保存内容のテスト追加 |
+
+---
+
 ## アップロード時の存在確認と作成をatomicにする（refs #20）
 
 ### 概要
