@@ -1,5 +1,137 @@
 # kaft 設計・仕様規約
 
+## ファイルのアップロード・ダウンロードをストリーミング化する（refs #21）
+
+### 概要
+
+現在はアップロードで`call.receive<ByteArray>()`、ダウンロードで`getBytes()`/`respondBytes()`を使用しており、
+R2 backendでも`readAllBytes()`している。ファイルサイズに比例してJVM heapを消費するため、Ktor 3.1.3の
+`ByteReadChannel`/`ByteWriteChannel`を使い、ファイル本体を`ByteArray`として保持せずに逐次転送する。
+
+### 前提調査（Ktor 3.1.3 / ktor-io 3.1.3で存在を確認済みのAPI）
+
+| API | シグネチャ | 用途 |
+|---|---|---|
+| `ApplicationCall.receiveChannel()` | `suspend fun receiveChannel(): ByteReadChannel` | アップロードのリクエストボディをストリームで受け取る |
+| `ApplicationCall.respondBytesWriter()` | `suspend fun respondBytesWriter(contentType, status, contentLength: Long?, block: suspend ByteWriteChannel.() -> Unit)` | ダウンロードレスポンスをストリームで書き出す |
+| `HttpMessage.contentLength()` | `fun contentLength(): Long?` | `Content-Length`ヘッダーからサイズを取得（`ApplicationRequest`は`HttpMessage`） |
+| `ByteReadChannel.copyTo(ByteWriteChannel, limit)` | `suspend fun copyTo(dst: ByteWriteChannel, limit: Long = Long.MAX_VALUE): Long` | チャネル間の逐次コピー |
+| `ByteReadChannel.copyTo(OutputStream, limit)`（`io.ktor.utils.io.jvm.javaio`） | `suspend fun copyTo(out: OutputStream, limit: Long = Long.MAX_VALUE): Long` | Local backendのファイル書き込み |
+| `ByteReadChannel.toInputStream()`（同上） | `fun toInputStream(parentJob: Job? = null): InputStream` | 同期のR2 SDKへ渡すためのブロッキング変換 |
+| `InputStream.toByteReadChannel()`（同上） | `fun toByteReadChannel(context: CoroutineContext = Dispatchers.IO, ...): ByteReadChannel` | Local/R2のダウンロード時にInputStreamをChannel化 |
+
+### 設計方針
+
+| 項目 | 方針 |
+|---|---|
+| `FileStorage.createPending` | `data: ByteArray` → `data: ByteReadChannel, size: Long`に変更し、`suspend fun`にする（ストリーム読み取り自体がsuspend操作のため） |
+| `FileStorage.getBytes` | 廃止し、`openReadChannel(id: FileId): ByteReadChannel?`に置き換える |
+| サイズの取得元 | アップロードリクエストの`Content-Length`ヘッダー（`call.request.contentLength()`）。**`Content-Length`が無いリクエスト（chunked等）は`411 Length Required`を返し拒否する**（サイズ不明のストリームをR2の同期SDKへ渡せないため。将来的にchunked対応が必要なら別issueで検討） |
+| Local backend | 書き込みは`ByteReadChannel.copyTo(OutputStream)`、読み取りは`Files.newInputStream(path).toByteReadChannel()` |
+| R2 backend | 書き込みは`ByteReadChannel.toInputStream()`で同期`InputStream`に変換し`RequestBody.fromInputStream(stream, size)`へ渡す（同期SDKのため`size`が必須）。読み取りは`GetObjectResponse`の`InputStream`をそのまま`toByteReadChannel()`する（`readAllBytes()`を廃止） |
+| ルート層 | `FileRoutes.kt`のPUTは`call.receiveChannel()`を`createPending`に渡す。GETは`respondBytesWriter(contentType, contentLength = meta.size) { fileStorage.openReadChannel(id)!!.copyTo(this) }`を使う |
+| 非同期化(Dispatchers.IO分離、R2のS3AsyncClient化) | 本issueでは行わない（#22のスコープ）。あくまで「ByteArrayとして全体を保持しない」ことが目的で、blocking I/Oの分離は別issue |
+| `meta.json`の読み書き | サイズが小さいため対象外（従来どおり`readAllBytes`/文字列で扱う） |
+
+### 変更内容
+
+**`storage/FileStorage.kt`**
+
+```kotlin
+interface FileStorage {
+    fun exists(id: FileId): Boolean
+    suspend fun createPending(id: FileId, data: ByteReadChannel, size: Long, contentType: String): CreateResult
+    fun confirm(id: FileId)
+    fun getMeta(id: FileId): FileMeta?
+    fun delete(id: FileId)
+    fun updateVisibility(id: FileId, visibility: Visibility)
+    fun openReadChannel(id: FileId): ByteReadChannel?
+}
+```
+
+**`storage/LocalFileStorage.kt`**
+
+```kotlin
+override suspend fun createPending(id: FileId, data: ByteReadChannel, size: Long, contentType: String): CreateResult {
+    try {
+        Files.createDirectory(fileDir(id))
+    } catch (_: FileAlreadyExistsException) {
+        return CreateResult.AlreadyExists
+    }
+    Files.newOutputStream(dataPath(id)).use { out -> data.copyTo(out) }
+    writeMeta(id, FileMeta(state = PENDING, visibility = PRIVATE, contentType = contentType, size = size))
+    return CreateResult.Created
+}
+
+override fun openReadChannel(id: FileId): ByteReadChannel? =
+    if (Files.exists(dataPath(id))) Files.newInputStream(dataPath(id)).toByteReadChannel() else null
+```
+
+**`storage/R2FileStorage.kt`**
+
+```kotlin
+override suspend fun createPending(id: FileId, data: ByteReadChannel, size: Long, contentType: String): CreateResult {
+    try {
+        client.putObject(... ifNoneMatch("*") ..., RequestBody.fromString(metaJson))
+    } catch (e: S3Exception) {
+        if (e.statusCode() == 412) return CreateResult.AlreadyExists else throw e
+    }
+    client.putObject(
+        PutObjectRequest.builder().bucket(bucket).key(dataKey(id)).build(),
+        RequestBody.fromInputStream(data.toInputStream(), size),
+    )
+    return CreateResult.Created
+}
+
+override fun openReadChannel(id: FileId): ByteReadChannel? {
+    if (!headExists(dataKey(id))) return null
+    return client.getObject(GetObjectRequest.builder().bucket(bucket).key(dataKey(id)).build()).toByteReadChannel()
+}
+```
+
+**`routes/FileRoutes.kt`**
+
+```kotlin
+put("/files/{uuid}") {
+    // fileId, token検証は既存どおり
+    val size = call.request.contentLength() ?: return@put call.respond(HttpStatusCode.LengthRequired)
+    val contentType = call.request.headers[HttpHeaders.ContentType] ?: DEFAULT_CONTENT_TYPE
+    when (fileStorage.createPending(fileId, call.receiveChannel(), size, contentType)) {
+        CreateResult.Created -> call.respond(HttpStatusCode.Created)
+        CreateResult.AlreadyExists -> call.respond(HttpStatusCode.Conflict)
+    }
+}
+
+get("/files/{uuid}/{filename}") {
+    // meta取得・visibility検証は既存どおり
+    val channel = fileStorage.openReadChannel(fileId) ?: return@get call.respond(HttpStatusCode.NotFound)
+    // ContentDisposition/CacheControlヘッダーは既存どおり設定
+    call.respondBytesWriter(contentType = ContentType.parse(meta.contentType), contentLength = meta.size) {
+        channel.copyTo(this)
+    }
+}
+```
+
+### テスト
+
+- `FileRoutesTest.kt`
+  - 既存テストが`call.receiveChannel()`経由でも通ることを確認（Ktor test clientは`setBody(ByteArray)`で自動的に`Content-Length`を設定するため無変更で通る想定）
+  - 数MB規模のランダムバイト列をアップロード・ダウンロードし、内容が一致することを確認する大きめファイルのテストを追加する
+  - `Content-Length`が送信されないリクエスト（chunked transfer）で`411 Length Required`になることを確認する
+- R2 backendについては、既存のS3Client mockインフラがないため自動テストは見送る（#24と同様の方針）
+
+### 作成・変更ファイル一覧（#21）
+
+| ファイル | 変更種別 | 内容 |
+|---|---|---|
+| `src/main/kotlin/net/kigawa/kaft/storage/FileStorage.kt` | 更新 | `createPending`をストリーミングAPIに変更、`getBytes`を`openReadChannel`に置き換え |
+| `src/main/kotlin/net/kigawa/kaft/storage/LocalFileStorage.kt` | 更新 | ストリーミング読み書きに変更 |
+| `src/main/kotlin/net/kigawa/kaft/storage/R2FileStorage.kt` | 更新 | ストリーミング読み書きに変更（同期SDKのため`size`必須） |
+| `src/main/kotlin/net/kigawa/kaft/routes/FileRoutes.kt` | 更新 | `receiveChannel`/`respondBytesWriter`に変更、`Content-Length`必須化 |
+| `src/test/kotlin/net/kigawa/kaft/FileRoutesTest.kt` | 更新 | 大きめファイル・Content-Length欠如のテストを追加 |
+
+---
+
 ## R2メタデータ更新の競合によるlost updateを防止する（refs #24）
 
 ### 概要
