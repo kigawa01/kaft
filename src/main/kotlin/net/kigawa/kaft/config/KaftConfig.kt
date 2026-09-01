@@ -32,6 +32,16 @@ data class KaftConfig(
     val internal: InternalConfig,
 ) {
     companion object {
+        private const val DEFAULT_JWT_SECRET = "change-this-secret-in-production"
+        private const val DEFAULT_INTERNAL_JWT_SECRET = "change-this-internal-secret-in-production"
+
+        private fun requireSecureSecret(value: String, envVarName: String): String {
+            check(value.isNotBlank() && value != DEFAULT_JWT_SECRET && value != DEFAULT_INTERNAL_JWT_SECRET) {
+                "環境変数 $envVarName が未設定、またはデフォルト値のままです。安全な値を設定してください。"
+            }
+            return value
+        }
+
         fun fromApplication(app: Application): KaftConfig {
             val config = app.environment.config
             val backend = config.propertyOrNull("kaft.storage.backend")?.getString() ?: "local"
@@ -50,12 +60,15 @@ data class KaftConfig(
             return KaftConfig(
                 storage = storage,
                 jwt = JwtConfig(
-                    secret = config.property("kaft.jwt.secret").getString(),
+                    secret = requireSecureSecret(config.property("kaft.jwt.secret").getString(), "KAFT_JWT_SECRET"),
                     issuer = config.property("kaft.jwt.issuer").getString(),
                     expirationSeconds = config.property("kaft.jwt.expirationSeconds").getString().toLong(),
                 ),
                 internal = InternalConfig(
-                    jwtSecret = config.property("kaft.internal.jwtSecret").getString(),
+                    jwtSecret = requireSecureSecret(
+                        config.property("kaft.internal.jwtSecret").getString(),
+                        "KAFT_INTERNAL_JWT_SECRET",
+                    ),
                 ),
             )
         }
