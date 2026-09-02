@@ -11,6 +11,7 @@ const val TEST_INTERNAL_SECRET = "test-internal-secret"
 const val TEST_JWT_ISSUER = "kaft-test"
 const val TEST_INTERNAL_ISSUER = "api-server-test"
 const val TEST_INTERNAL_AUDIENCE = "kaft-test"
+const val TEST_ALLOWED_ORIGIN = "https://frontend-test.invalid"
 
 fun createTestConfig(storageDir: Path): ApplicationConfig = MapApplicationConfig(
     "ktor.deployment.port" to "8080",
@@ -21,6 +22,7 @@ fun createTestConfig(storageDir: Path): ApplicationConfig = MapApplicationConfig
     "kaft.internal.jwtSecret" to TEST_INTERNAL_SECRET,
     "kaft.internal.issuer" to TEST_INTERNAL_ISSUER,
     "kaft.internal.audience" to TEST_INTERNAL_AUDIENCE,
+    "kaft.cors.allowedOrigins" to TEST_ALLOWED_ORIGIN,
 )
 
 fun issueUploadToken(uuid: String): String =

@@ -16,6 +16,10 @@ data class InternalConfig(
     val audience: String,
 )
 
+data class CorsConfig(
+    val allowedOrigins: List<String>,
+)
+
 data class R2StorageConfig(
     val accountId: String,
     val bucket: String,
@@ -32,6 +36,7 @@ data class KaftConfig(
     val storage: StorageConfig,
     val jwt: JwtConfig,
     val internal: InternalConfig,
+    val cors: CorsConfig,
 ) {
     companion object {
         private const val DEFAULT_JWT_SECRET = "change-this-secret-in-production"
@@ -73,6 +78,12 @@ data class KaftConfig(
                     ),
                     issuer = config.property("kaft.internal.issuer").getString(),
                     audience = config.property("kaft.internal.audience").getString(),
+                ),
+                cors = CorsConfig(
+                    allowedOrigins = (config.propertyOrNull("kaft.cors.allowedOrigins")?.getString() ?: "")
+                        .split(",")
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() },
                 ),
             )
         }

@@ -1,9 +1,11 @@
 package net.kigawa.kaft
 
+import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
 import io.ktor.server.plugins.contentnegotiation.*
+import io.ktor.server.plugins.cors.routing.*
 import net.kigawa.kaft.auth.JwtService
 import net.kigawa.kaft.config.KaftConfig
 import net.kigawa.kaft.config.StorageConfig
@@ -24,6 +26,18 @@ fun Application.module() {
 
     install(ContentNegotiation) {
         json()
+    }
+
+    // ブラウザがfiles APIへ直接PUT/GETするため（KaftConfig.cors参照）。
+    install(CORS) {
+        allowMethod(HttpMethod.Get)
+        allowMethod(HttpMethod.Put)
+        allowHeader(HttpHeaders.Authorization)
+        allowHeader(HttpHeaders.ContentType)
+        config.cors.allowedOrigins.forEach { origin ->
+            val url = Url(origin)
+            allowHost(url.host, schemes = listOf(url.protocol.name))
+        }
     }
 
     install(Authentication) {
