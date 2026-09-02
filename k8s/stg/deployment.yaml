@@ -58,6 +58,8 @@ spec:
                 secretKeyRef:
                   name: kaft-jwt
                   key: internalJwtSecret
+            - name: KAFT_CORS_ALLOWED_ORIGINS
+              value: https://stg-lipl.kigawa.net
           startupProbe:
             httpGet:
               path: /health
